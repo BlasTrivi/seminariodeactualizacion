@@ -3,6 +3,13 @@
 Los cambios más recientes aparecen primero. Cada ejercicio corresponde a un
 día de trabajo (commit `"Día X: ..."`).
 
+## [Ejercicio 05]
+
+- Se crea `src/book_manager/preload_data/preload_data.py` con los datos
+  iniciales (mínimo 10 registros por entidad) y la función
+  `cargar_datos_iniciales`.
+- Se generan los archivos CSV en `src/book_manager/migrations/csv/`.
+
 ## [Ejercicio 04]
 
 - Se crea `src/book_manager/services/services.py` con `ServicioBase` y un

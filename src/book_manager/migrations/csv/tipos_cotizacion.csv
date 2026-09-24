@@ -1,0 +1,13 @@
+id,nombre,descripcion
+1,Oficial,Cotización del Banco Nación
+2,Blue,Mercado informal
+3,MEP,Dólar Bolsa (mercado electrónico de pagos)
+4,CCL,Contado con liquidación
+5,Tarjeta,Consumos en el exterior con tarjeta
+6,Mayorista,Mercado mayorista (BCRA)
+7,Cripto,Cotización en exchanges de criptomonedas
+8,Ahorro,Dólar ahorro / solidario
+9,Turista,Gastos de turismo en el exterior
+10,Exportación,Liquidación de exportaciones
+11,Qatar,Consumos con tarjeta sobre el tope (histórico)
+12,Futuro,Contratos de dólar futuro

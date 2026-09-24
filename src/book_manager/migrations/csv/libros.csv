@@ -1,0 +1,15 @@
+id,isbn,titulo,autor,editorial_id,genero_id,anio
+1,9788497592208,Cien años de soledad,Gabriel García Márquez,4,1,1967
+2,9788420437484,Rayuela,Julio Cortázar,2,1,1963
+3,9789500427999,El Aleph,Jorge Luis Borges,3,2,1949
+4,9788499089508,Ficciones,Jorge Luis Borges,4,2,1944
+5,9788499926223,Sapiens: De animales a dioses,Yuval Noah Harari,5,3,2011
+6,9788478887194,El principito,Antoine de Saint-Exupéry,6,4,1943
+7,9781593279288,Python Crash Course,Eric Matthes,7,6,2019
+8,9780132350884,Clean Code,Robert C. Martin,8,6,2008
+9,9788478884452,Harry Potter y la piedra filosofal,J. K. Rowling,6,5,1997
+10,9788499890944,1984,George Orwell,4,1,1949
+11,9788498921182,Breve historia del tiempo,Stephen Hawking,12,7,1988
+12,9789507315114,El túnel,Ernesto Sabato,9,1,1948
+13,9789505157006,Mafalda 1,Quino,10,11,1970
+14,9788499923048,Steve Jobs,Walter Isaacson,5,12,2011
