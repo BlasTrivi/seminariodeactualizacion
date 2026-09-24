@@ -3,6 +3,16 @@
 Los cambios más recientes aparecen primero. Cada ejercicio corresponde a un
 día de trabajo (commit `"Día X: ..."`).
 
+## [Ejercicio 04]
+
+- Se crea `src/book_manager/services/services.py` con `ServicioBase` y un
+  servicio por entidad con las reglas de negocio: unicidad de nombres, códigos
+  e ISBN; integridad referencial; borrado bloqueado (género, editorial, moneda,
+  tipo de cotización en uso) y en cascada (libro con sus precios y stock).
+- Se agrega `ServicioCotizador` con los reportes de valuación: catálogo
+  valuado, cotización de un libro y valor total del inventario.
+- Se agrega el contenedor `Servicios` con inyección de repositorios.
+
 ## [Ejercicio 03]
 
 - Se crea `src/book_manager/repositories/repositories.py` con las interfaces
