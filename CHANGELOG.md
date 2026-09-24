@@ -3,6 +3,15 @@
 Los cambios más recientes aparecen primero. Cada ejercicio corresponde a un
 día de trabajo (commit `"Día X: ..."`).
 
+## [Ejercicio 06]
+
+- Se crea `src/book_manager/ui/console.py` con la clase `ConsolaUI`: menú
+  principal, submenú ABM (Listar / Alta / Modificar / Baja) para cada entidad
+  y menú de reportes.
+- Helpers de entrada con validación (`_pedir_texto`, `_pedir_int`,
+  `_pedir_float`, `_pedir_fecha`) e impresión de tablas.
+- Operaciones extra: búsqueda y detalle de libros, ingreso y egreso de stock.
+
 ## [Ejercicio 05]
 
 - Se crea `src/book_manager/preload_data/preload_data.py` con los datos
