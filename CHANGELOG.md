@@ -3,6 +3,13 @@
 Los cambios más recientes aparecen primero. Cada ejercicio corresponde a un
 día de trabajo (commit `"Día X: ..."`).
 
+## [Ejercicio 07]
+
+- Se crea `src/book_manager/main.py` con la función `main(import_default_data)`
+  que construye los repositorios y los servicios y lanza la consola.
+- Carga automática de los datos iniciales cuando falta algún archivo CSV.
+- Se completa el notebook de entrega `01_Book_Manager_Grupo_15.ipynb`.
+
 ## [Ejercicio 06]
 
 - Se crea `src/book_manager/ui/console.py` con la clase `ConsolaUI`: menú
