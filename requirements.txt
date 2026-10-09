@@ -1,4 +1,6 @@
-# Book Manager - Sprint 1
-# El proyecto utiliza únicamente la biblioteca estándar de Python (>= 3.10):
-# abc, csv, dataclasses, datetime, pathlib y typing.
-# No hay dependencias externas que instalar.
+# Book Manager - Sprint 2
+# Además de la biblioteca estándar (abc, csv, dataclasses, datetime, pathlib,
+# typing) el proyecto utiliza:
+SQLAlchemy>=2.0        # ORM y conexión a la base de datos (Ejercicios 02-06)
+python-dotenv>=1.0     # Lectura del archivo .env (Ejercicio 07)
+requests>=2.31         # Consulta a la API del dólar (Ejercicio 07)

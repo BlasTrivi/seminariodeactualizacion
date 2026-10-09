@@ -3,6 +3,77 @@
 Los cambios más recientes aparecen primero. Cada ejercicio corresponde a un
 día de trabajo (commit `"Día X: ..."`).
 
+# Sprint 2
+
+## [Ejercicio 08]
+
+- Se agregan al menú principal de `ui/console.py` las opciones: *Obtener
+  las cotizaciones por API*, *Lista de precios bimonetaria* (pesos y otra
+  moneda seleccionada) y *Exportar precios a CSV* para todas las monedas
+  con cotización (también disponibles en el menú de Reportes).
+- El ABM de tipos de cotización pide y muestra la moneda a la que
+  pertenece cada tipo.
+- Se completa el notebook de entrega `02_Book_Manager_Grupo_15.ipynb`.
+
+## [Ejercicio 07]
+
+- Se crea el archivo `.env` con `API_URL`, `API_URL_COTIZACIONES` y
+  `DATABASE_URL`; las variables se leen con `python-dotenv`.
+- `ClienteCotizacionesAPI` descarga las cotizaciones con `requests`.
+- `ServicioCotizacionDolar.obtener_cotizaciones` busca, descarga y registra
+  en la base las cotizaciones (crea la moneda y el tipo si no existen;
+  actualiza la cotización del día si ya estaba cargada).
+- `ServicioCotizador`: `lista_precios_bimonetaria`, `exportar_precios_csv`
+  y `monedas_con_cotizacion`.
+- `requirements.txt` con SQLAlchemy, python-dotenv y requests.
+
+## [Ejercicio 06]
+
+- `repositories/repositories.py` pasa de CSV a base de datos: se mantienen
+  las interfaces del enunciado y las firmas usadas por los servicios.
+- `RepositorioSQL` genérico (CRUD, `contar`, `vaciar`) con conversión
+  entidad <-> modelo; repositorios de `Stock` y `Cotizacion` con clave
+  natural; `Repositorios.desde_conexion`.
+- Los servicios usan `moneda_id` del tipo de cotización (unicidad por
+  moneda, borrado bloqueado) y la baja de libro elimina precios y stock
+  antes que el libro para respetar las claves foráneas.
+
+## [Ejercicio 05]
+
+- Se crea `migrations/migrations.py` con `migrar_datos(carpeta_csvs,
+  carpeta_sqls)`: lee los CSV del TP1, puebla la base a través de los
+  repositorios y genera un `.sql` por tabla (más `00_esquema.sql` con el
+  DDL) en `migrations/sql`.
+- `preload_data.py` pasa a generar los archivos CSV de origen.
+
+## [Ejercicio 04]
+
+- Se crea `models/models.py` con las tablas `generos`, `editoriales`,
+  `monedas`, `tipos_cotizacion`, `libros`, `precios`, `stock` y
+  `cotizaciones`: tipos de datos, claves primarias y foráneas,
+  restricciones de unicidad y relaciones (`relationship`) con cascada.
+- Normalización: `TipoCotizacion` incorpora `moneda_id` (entidad y modelo).
+
+## [Ejercicio 03]
+
+- Se agrega a `database/connection.py` el context manager `Transaccion`
+  (`__enter__` / `__exit__`): commit al terminar el bloque, rollback ante
+  excepciones y cierre de la sesión.
+
+## [Ejercicio 02]
+
+- Se crea `database/connection.py` con la clase `ConexionDB`: lee
+  `DATABASE_URL` del `.env`, construye el motor de SQLAlchemy, crea o
+  elimina las tablas, prueba la conexión y entrega sesiones.
+
+## [Ejercicio 01]
+
+- Se crea la rama `Sprint_2` a partir de `Sprint_1`.
+- Nueva estructura de directorios: `database/`, `models/`,
+  `migrations/sql/`, `.env`; se actualizan `README.md` y `.gitignore`.
+
+# Sprint 1
+
 ## [Ejercicio 07]
 
 - Se crea `src/book_manager/main.py` con la función `main(import_default_data)`
