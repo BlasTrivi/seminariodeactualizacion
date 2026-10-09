@@ -1,10 +1,15 @@
-"""Entidades del dominio de Book Manager (Sprint 1).
+"""Entidades del dominio de Book Manager.
 
 Cada clase representa una tabla del sistema. Los datos se guardan en
 atributos privados y se exponen mediante propiedades que validan cada
 valor antes de asignarlo (encapsulamiento). Todas las entidades saben
-convertirse a un diccionario de cadenas y reconstruirse a partir de él,
-que es el formato que utilizan los repositorios CSV para persistirlas.
+convertirse a un diccionario de cadenas y reconstruirse a partir de él:
+es el formato de los archivos CSV del Sprint 1 y el que usa la migración
+del Sprint 2 para poblar la base de datos.
+
+Sprint 2: ``TipoCotizacion`` incorpora ``moneda_id`` (normalización),
+de modo que un tipo de cotización pertenece a una moneda (el dólar tiene
+Oficial, Blue, MEP...; el euro o el real tienen su cotización Oficial).
 """
 from __future__ import annotations
 
@@ -17,6 +22,9 @@ S = TypeVar("S", bound="Serializable")
 ANIO_MINIMO = 1450
 LONGITUDES_ISBN = (10, 13)
 FORMATO_FECHA = "%Y-%m-%d"
+#: Id de la moneda USD en los datos iniciales (valor por defecto para los
+#: tipos de cotización que vienen de los CSV del Sprint 1).
+MONEDA_USD_ID = 2
 
 
 # ---------------------------------------------------------------------------
@@ -285,17 +293,25 @@ class Moneda(EntidadBase):
 
 
 class TipoCotizacion(EntidadBase):
-    """Tipo de cotización del dólar (Oficial, Blue, MEP, etc.)."""
+    """Tipo de cotización de una moneda (Oficial, Blue, MEP, etc.).
 
-    CAMPOS = ("id", "nombre", "descripcion")
+    ``moneda_id`` indica a qué moneda corresponde el tipo de cambio. Los
+    archivos CSV del Sprint 1 no tenían esta columna: en ese caso la
+    migración asigna el dólar (USD).
+    """
+
+    CAMPOS = ("id", "nombre", "descripcion", "moneda_id")
 
     def __init__(self, nombre: str, descripcion: str = "",
+                 moneda_id: int = MONEDA_USD_ID,
                  id: Optional[int] = None) -> None:
         super().__init__(id)
         self._nombre = ""
         self._descripcion = ""
+        self._moneda_id = 0
         self.nombre = nombre
         self.descripcion = descripcion
+        self.moneda_id = moneda_id
 
     @property
     def nombre(self) -> str:
@@ -313,14 +329,26 @@ class TipoCotizacion(EntidadBase):
     def descripcion(self, valor: str) -> None:
         self._descripcion = texto_opcional(valor)
 
+    @property
+    def moneda_id(self) -> int:
+        """Id de la moneda a la que pertenece el tipo de cotización."""
+        return self._moneda_id
+
+    @moneda_id.setter
+    def moneda_id(self, valor: int) -> None:
+        self._moneda_id = entero_positivo(valor, "moneda_id")
+
     def a_dict(self) -> Dict[str, str]:
         return {"id": self._id_como_texto(), "nombre": self.nombre,
-                "descripcion": self.descripcion}
+                "descripcion": self.descripcion,
+                "moneda_id": str(self.moneda_id)}
 
     @classmethod
     def desde_dict(cls, datos: Dict[str, str]) -> "TipoCotizacion":
+        moneda_id = datos.get("moneda_id") or MONEDA_USD_ID
         return cls(nombre=datos["nombre"],
                    descripcion=datos.get("descripcion", ""),
+                   moneda_id=int(moneda_id),
                    id=id_opcional(datos.get("id")))
 
     def __str__(self) -> str:
@@ -553,7 +581,11 @@ class Stock(Serializable):
 
 
 class CotizacionDolar(Serializable):
-    """Cotización histórica del dólar. Su clave es (tipo_id, fecha)."""
+    """Cotización histórica de un tipo de cambio. Clave: (tipo_id, fecha).
+
+    Conserva el nombre del Sprint 1; desde el Sprint 2 el tipo de
+    cotización puede pertenecer a cualquier moneda (ver TipoCotizacion).
+    """
 
     CAMPOS = ("tipo_id", "fecha", "compra", "venta")
 
