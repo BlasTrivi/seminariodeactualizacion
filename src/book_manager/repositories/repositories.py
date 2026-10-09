@@ -1,28 +1,37 @@
-"""Repositorios: persistencia de las entidades en archivos CSV.
+"""Repositorios: persistencia de las entidades en la base de datos.
 
-Se toman como base las interfaces propuestas en el enunciado
-(``IRepositorio``, ``IRepositorioStock`` e ``IRepositorioCotizacionDolar``)
-y se implementan sobre archivos CSV. Cada repositorio administra un único
-archivo y ofrece el CRUD completo (Alta, Lectura, Modificación y Borrado).
+Se mantienen las interfaces del enunciado (``IRepositorio``,
+``IRepositorioStock`` e ``IRepositorioCotizacionDolar``) y la firma de
+todos los métodos que usaban los servicios en el Sprint 1, pero la
+implementación pasa de archivos CSV a tablas relacionales mediante
+SQLAlchemy. Cada operación se ejecuta dentro del context manager de
+transacciones de ``ConexionDB`` (Ejercicio 03).
+
+Las entidades del dominio siguen siendo las clases de ``entities.py``;
+cada repositorio sabe convertir entidad <-> modelo ORM.
 """
 from __future__ import annotations
 
 import abc
-import csv
 import datetime
 from dataclasses import dataclass
-from pathlib import Path
-from typing import (
-    Any, Generic, Iterable, List, Optional, Type, TypeVar,
-)
+from typing import Any, Generic, List, Optional, Type, TypeVar
 
+from sqlalchemy import delete, func, select
+from sqlalchemy.orm import Session
+
+from book_manager.database.connection import ConexionDB
 from book_manager.entities.entities import (
     CotizacionDolar, Editorial, EntidadBase, Genero, Libro, Moneda, Precio,
-    Serializable, Stock, TipoCotizacion,
+    Stock, TipoCotizacion,
+)
+from book_manager.models.models import (
+    Base, CotizacionModel, EditorialModel, GeneroModel, LibroModel,
+    MonedaModel, PrecioModel, StockModel, TipoCotizacionModel,
 )
 
 T = TypeVar("T", bound=EntidadBase)
-S = TypeVar("S", bound=Serializable)
+M = TypeVar("M", bound=Base)
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +168,7 @@ class IRepositorioCotizacionDolar(abc.ABC):
 
     @abc.abstractmethod
     def crear(self, cotizacion: CotizacionDolar) -> CotizacionDolar:
-        """Crea una nueva cotización de dólar.
+        """Crea una nueva cotización.
 
         Args:
             cotizacion (CotizacionDolar): El objeto CotizacionDolar a crear.
@@ -176,7 +185,7 @@ class IRepositorioCotizacionDolar(abc.ABC):
     def leer_por_tipo_y_fecha(
             self, tipo_id: int,
             fecha: datetime.date) -> Optional[CotizacionDolar]:
-        """Lee una cotización de dólar por tipo y fecha.
+        """Lee una cotización por tipo y fecha.
 
         Args:
             tipo_id (int): El ID del tipo de cotización.
@@ -209,7 +218,7 @@ class IRepositorioCotizacionDolar(abc.ABC):
 
     @abc.abstractmethod
     def actualizar(self, cotizacion: CotizacionDolar) -> CotizacionDolar:
-        """Actualiza una cotización de dólar existente.
+        """Actualiza una cotización existente.
 
         Args:
             cotizacion (CotizacionDolar): El objeto CotizacionDolar a
@@ -224,7 +233,7 @@ class IRepositorioCotizacionDolar(abc.ABC):
 
     @abc.abstractmethod
     def eliminar(self, tipo_id: int, fecha: datetime.date) -> bool:
-        """Elimina una cotización de dólar por tipo y fecha.
+        """Elimina una cotización por tipo y fecha.
 
         Args:
             tipo_id (int): El ID del tipo de cotización.
@@ -237,336 +246,416 @@ class IRepositorioCotizacionDolar(abc.ABC):
 
 
 # ---------------------------------------------------------------------------
-# Acceso al archivo CSV
+# Implementación genérica sobre SQLAlchemy para entidades con id
 # ---------------------------------------------------------------------------
 
-class AlmacenCSV(Generic[S]):
-    """Lee y escribe una lista de entidades en un archivo CSV."""
+class RepositorioSQL(IRepositorio[T], Generic[T, M]):
+    """CRUD genérico sobre la base de datos para entidades con id.
 
-    def __init__(self, ruta: Path, clase: Type[S]) -> None:
-        self._ruta = Path(ruta)
-        self._clase = clase
+    Las subclases indican el modelo ORM (``modelo``) y definen las dos
+    conversiones: ``_volcar`` (entidad -> columnas del modelo) y
+    ``_a_entidad`` (modelo -> entidad).
+    """
+
+    #: Modelo ORM (tabla) que administra el repositorio.
+    modelo: Type[M]
+
+    def __init__(self, conexion: ConexionDB) -> None:
+        self._conexion = conexion
 
     @property
-    def ruta(self) -> Path:
-        return self._ruta
+    def conexion(self) -> ConexionDB:
+        return self._conexion
 
-    def existe(self) -> bool:
-        return self._ruta.exists()
+    # -- conversiones (hooks) ---------------------------------------------
 
-    def leer(self) -> List[S]:
-        """Devuelve todas las filas del archivo convertidas a entidades."""
-        if not self._ruta.exists():
-            self.escribir([])
-            return []
-        with self._ruta.open(newline="", encoding="utf-8") as archivo:
-            lector = csv.DictReader(archivo)
-            return [self._clase.desde_dict(fila) for fila in lector]
+    @abc.abstractmethod
+    def _volcar(self, entidad: T, modelo: M) -> None:
+        """Copia los atributos de la entidad en el modelo ORM."""
 
-    def escribir(self, entidades: Iterable[S]) -> None:
-        """Reemplaza el contenido del archivo con las entidades recibidas."""
-        self._ruta.parent.mkdir(parents=True, exist_ok=True)
-        with self._ruta.open("w", newline="", encoding="utf-8") as archivo:
-            escritor = csv.DictWriter(archivo, fieldnames=self._clase.CAMPOS,
-                                      lineterminator="\n")
-            escritor.writeheader()
-            for entidad in entidades:
-                escritor.writerow(entidad.a_dict())
+    @abc.abstractmethod
+    def _a_entidad(self, modelo: M) -> T:
+        """Construye la entidad del dominio a partir del modelo ORM."""
 
-    def vaciar(self) -> None:
-        """Deja el archivo únicamente con el encabezado."""
-        self.escribir([])
+    # -- CRUD -------------------------------------------------------------
 
-
-# ---------------------------------------------------------------------------
-# Implementación genérica para entidades con id
-# ---------------------------------------------------------------------------
-
-class RepositorioCSV(IRepositorio[T]):
-    """CRUD genérico sobre CSV para cualquier entidad con id."""
-
-    def __init__(self, ruta: Path, clase: Type[T]) -> None:
-        self._almacen: AlmacenCSV[T] = AlmacenCSV(ruta, clase)
-
-    @property
-    def ruta(self) -> Path:
-        return self._almacen.ruta
-
-    @staticmethod
-    def _siguiente_id(entidades: List[T]) -> int:
-        return max((e.id or 0 for e in entidades), default=0) + 1
+    def _siguiente_id(self, sesion: Session) -> int:
+        """Próximo id disponible (independiente del motor de base de datos)."""
+        maximo = sesion.execute(select(func.max(self.modelo.id))).scalar()
+        return int(maximo or 0) + 1
 
     def crear(self, entidad: T) -> T:
-        entidades = self._almacen.leer()
-        if entidad.id is None:
-            entidad.id = self._siguiente_id(entidades)
-        elif any(e.id == entidad.id for e in entidades):
-            raise ValueError(f"Ya existe un registro con id {entidad.id}.")
-        entidades.append(entidad)
-        self._almacen.escribir(entidades)
+        with self._conexion.transaccion() as sesion:
+            if entidad.id is None:
+                entidad.id = self._siguiente_id(sesion)
+            elif sesion.get(self.modelo, entidad.id) is not None:
+                raise ValueError(
+                    f"Ya existe un registro con id {entidad.id}.")
+            registro = self.modelo()
+            self._volcar(entidad, registro)
+            registro.id = entidad.id
+            sesion.add(registro)
         return entidad
 
     def leer_por_id(self, id: int) -> Optional[T]:
-        for entidad in self._almacen.leer():
-            if entidad.id == id:
-                return entidad
-        return None
+        with self._conexion.transaccion() as sesion:
+            registro = sesion.get(self.modelo, id)
+            return None if registro is None else self._a_entidad(registro)
 
     def leer_todos(self) -> List[T]:
-        return self._almacen.leer()
+        with self._conexion.transaccion() as sesion:
+            consulta = select(self.modelo).order_by(self.modelo.id)
+            return [self._a_entidad(r) for r in sesion.scalars(consulta)]
 
     def actualizar(self, entidad: T) -> T:
-        entidades = self._almacen.leer()
-        for posicion, existente in enumerate(entidades):
-            if existente.id == entidad.id:
-                entidades[posicion] = entidad
-                self._almacen.escribir(entidades)
-                return entidad
-        raise ValueError(f"No existe un registro con id {entidad.id}.")
+        with self._conexion.transaccion() as sesion:
+            registro = sesion.get(self.modelo, entidad.id)
+            if registro is None:
+                raise ValueError(
+                    f"No existe un registro con id {entidad.id}.")
+            self._volcar(entidad, registro)
+        return entidad
 
     def eliminar(self, id: int) -> bool:
-        entidades = self._almacen.leer()
-        restantes = [e for e in entidades if e.id != id]
-        if len(restantes) == len(entidades):
-            return False
-        self._almacen.escribir(restantes)
-        return True
+        with self._conexion.transaccion() as sesion:
+            registro = sesion.get(self.modelo, id)
+            if registro is None:
+                return False
+            sesion.delete(registro)
+            return True
+
+    def contar(self) -> int:
+        """Cantidad de registros en la tabla."""
+        with self._conexion.transaccion() as sesion:
+            return int(sesion.execute(
+                select(func.count()).select_from(self.modelo)).scalar() or 0)
 
     def vaciar(self) -> None:
         """Borra todos los registros (usado al recargar datos iniciales)."""
-        self._almacen.vaciar()
+        with self._conexion.transaccion() as sesion:
+            sesion.execute(delete(self.modelo))
+
+    def _buscar(self, sesion: Session, *condiciones: Any) -> List[T]:
+        consulta = select(self.modelo).where(*condiciones)
+        consulta = consulta.order_by(self.modelo.id)
+        return [self._a_entidad(r) for r in sesion.scalars(consulta)]
+
+    def _buscar_uno(self, sesion: Session, *condiciones: Any) -> Optional[T]:
+        registro = sesion.scalars(
+            select(self.modelo).where(*condiciones).limit(1)).first()
+        return None if registro is None else self._a_entidad(registro)
 
 
-class RepositorioGenero(RepositorioCSV[Genero]):
+class RepositorioGenero(RepositorioSQL[Genero, GeneroModel]):
     """Persistencia de géneros literarios."""
 
-    def __init__(self, ruta: Path) -> None:
-        super().__init__(ruta, Genero)
+    modelo = GeneroModel
+
+    def _volcar(self, entidad: Genero, modelo: GeneroModel) -> None:
+        modelo.nombre = entidad.nombre
+        modelo.descripcion = entidad.descripcion
+
+    def _a_entidad(self, modelo: GeneroModel) -> Genero:
+        return Genero(modelo.nombre, modelo.descripcion, id=modelo.id)
 
     def leer_por_nombre(self, nombre: str) -> Optional[Genero]:
-        nombre = nombre.strip().lower()
-        for genero in self.leer_todos():
-            if genero.nombre.lower() == nombre:
-                return genero
-        return None
+        with self._conexion.transaccion() as sesion:
+            return self._buscar_uno(
+                sesion,
+                func.lower(GeneroModel.nombre) == nombre.strip().lower())
 
 
-class RepositorioEditorial(RepositorioCSV[Editorial]):
+class RepositorioEditorial(RepositorioSQL[Editorial, EditorialModel]):
     """Persistencia de editoriales."""
 
-    def __init__(self, ruta: Path) -> None:
-        super().__init__(ruta, Editorial)
+    modelo = EditorialModel
+
+    def _volcar(self, entidad: Editorial, modelo: EditorialModel) -> None:
+        modelo.nombre = entidad.nombre
+        modelo.pais = entidad.pais
+
+    def _a_entidad(self, modelo: EditorialModel) -> Editorial:
+        return Editorial(modelo.nombre, modelo.pais, id=modelo.id)
 
     def leer_por_nombre(self, nombre: str) -> Optional[Editorial]:
-        nombre = nombre.strip().lower()
-        for editorial in self.leer_todos():
-            if editorial.nombre.lower() == nombre:
-                return editorial
-        return None
+        with self._conexion.transaccion() as sesion:
+            return self._buscar_uno(
+                sesion,
+                func.lower(EditorialModel.nombre) == nombre.strip().lower())
 
 
-class RepositorioMoneda(RepositorioCSV[Moneda]):
+class RepositorioMoneda(RepositorioSQL[Moneda, MonedaModel]):
     """Persistencia de monedas."""
 
-    def __init__(self, ruta: Path) -> None:
-        super().__init__(ruta, Moneda)
+    modelo = MonedaModel
+
+    def _volcar(self, entidad: Moneda, modelo: MonedaModel) -> None:
+        modelo.codigo = entidad.codigo
+        modelo.nombre = entidad.nombre
+        modelo.simbolo = entidad.simbolo
+
+    def _a_entidad(self, modelo: MonedaModel) -> Moneda:
+        return Moneda(modelo.codigo, modelo.nombre, modelo.simbolo,
+                      id=modelo.id)
 
     def leer_por_codigo(self, codigo: str) -> Optional[Moneda]:
-        codigo = codigo.strip().upper()
-        for moneda in self.leer_todos():
-            if moneda.codigo == codigo:
-                return moneda
-        return None
+        with self._conexion.transaccion() as sesion:
+            return self._buscar_uno(
+                sesion, MonedaModel.codigo == codigo.strip().upper())
 
 
-class RepositorioTipoCotizacion(RepositorioCSV[TipoCotizacion]):
-    """Persistencia de tipos de cotización del dólar."""
+class RepositorioTipoCotizacion(
+        RepositorioSQL[TipoCotizacion, TipoCotizacionModel]):
+    """Persistencia de tipos de cotización."""
 
-    def __init__(self, ruta: Path) -> None:
-        super().__init__(ruta, TipoCotizacion)
+    modelo = TipoCotizacionModel
 
-    def leer_por_nombre(self, nombre: str) -> Optional[TipoCotizacion]:
-        nombre = nombre.strip().lower()
-        for tipo in self.leer_todos():
-            if tipo.nombre.lower() == nombre:
-                return tipo
-        return None
+    def _volcar(self, entidad: TipoCotizacion,
+                modelo: TipoCotizacionModel) -> None:
+        modelo.nombre = entidad.nombre
+        modelo.descripcion = entidad.descripcion
+        modelo.moneda_id = entidad.moneda_id
+
+    def _a_entidad(self, modelo: TipoCotizacionModel) -> TipoCotizacion:
+        return TipoCotizacion(modelo.nombre, modelo.descripcion,
+                              modelo.moneda_id, id=modelo.id)
+
+    def leer_por_nombre(self, nombre: str,
+                        moneda_id: Optional[int] = None
+                        ) -> Optional[TipoCotizacion]:
+        """Busca por nombre (sin distinguir mayúsculas), opcionalmente
+        acotado a una moneda."""
+        condiciones: List[Any] = [
+            func.lower(TipoCotizacionModel.nombre) == nombre.strip().lower()]
+        if moneda_id is not None:
+            condiciones.append(TipoCotizacionModel.moneda_id == moneda_id)
+        with self._conexion.transaccion() as sesion:
+            return self._buscar_uno(sesion, *condiciones)
+
+    def leer_por_moneda(self, moneda_id: int) -> List[TipoCotizacion]:
+        with self._conexion.transaccion() as sesion:
+            return self._buscar(
+                sesion, TipoCotizacionModel.moneda_id == moneda_id)
 
 
-class RepositorioLibro(RepositorioCSV[Libro]):
+class RepositorioLibro(RepositorioSQL[Libro, LibroModel]):
     """Persistencia de libros."""
 
-    def __init__(self, ruta: Path) -> None:
-        super().__init__(ruta, Libro)
+    modelo = LibroModel
+
+    def _volcar(self, entidad: Libro, modelo: LibroModel) -> None:
+        modelo.isbn = entidad.isbn
+        modelo.titulo = entidad.titulo
+        modelo.autor = entidad.autor
+        modelo.editorial_id = entidad.editorial_id
+        modelo.genero_id = entidad.genero_id
+        modelo.anio = entidad.anio
+
+    def _a_entidad(self, modelo: LibroModel) -> Libro:
+        return Libro(modelo.isbn, modelo.titulo, modelo.autor,
+                     modelo.editorial_id, modelo.genero_id, modelo.anio,
+                     id=modelo.id)
 
     def leer_por_isbn(self, isbn: str) -> Optional[Libro]:
         isbn = isbn.replace("-", "").replace(" ", "")
-        for libro in self.leer_todos():
-            if libro.isbn == isbn:
-                return libro
-        return None
+        with self._conexion.transaccion() as sesion:
+            return self._buscar_uno(sesion, LibroModel.isbn == isbn)
 
     def leer_por_genero(self, genero_id: int) -> List[Libro]:
-        return [libro for libro in self.leer_todos()
-                if libro.genero_id == genero_id]
+        with self._conexion.transaccion() as sesion:
+            return self._buscar(sesion, LibroModel.genero_id == genero_id)
 
     def leer_por_editorial(self, editorial_id: int) -> List[Libro]:
-        return [libro for libro in self.leer_todos()
-                if libro.editorial_id == editorial_id]
+        with self._conexion.transaccion() as sesion:
+            return self._buscar(sesion,
+                                LibroModel.editorial_id == editorial_id)
 
     def buscar_por_titulo(self, texto: str) -> List[Libro]:
-        texto = texto.strip().lower()
-        return [libro for libro in self.leer_todos()
-                if texto in libro.titulo.lower()]
+        patron = f"%{texto.strip().lower()}%"
+        with self._conexion.transaccion() as sesion:
+            return self._buscar(sesion,
+                                func.lower(LibroModel.titulo).like(patron))
 
 
-class RepositorioPrecio(RepositorioCSV[Precio]):
+class RepositorioPrecio(RepositorioSQL[Precio, PrecioModel]):
     """Persistencia de precios."""
 
-    def __init__(self, ruta: Path) -> None:
-        super().__init__(ruta, Precio)
+    modelo = PrecioModel
+
+    def _volcar(self, entidad: Precio, modelo: PrecioModel) -> None:
+        modelo.libro_id = entidad.libro_id
+        modelo.moneda_id = entidad.moneda_id
+        modelo.valor = entidad.valor
+
+    def _a_entidad(self, modelo: PrecioModel) -> Precio:
+        return Precio(modelo.libro_id, modelo.moneda_id, modelo.valor,
+                      id=modelo.id)
 
     def leer_por_libro(self, libro_id: int) -> List[Precio]:
-        return [p for p in self.leer_todos() if p.libro_id == libro_id]
+        with self._conexion.transaccion() as sesion:
+            return self._buscar(sesion, PrecioModel.libro_id == libro_id)
 
     def leer_por_moneda(self, moneda_id: int) -> List[Precio]:
-        return [p for p in self.leer_todos() if p.moneda_id == moneda_id]
+        with self._conexion.transaccion() as sesion:
+            return self._buscar(sesion, PrecioModel.moneda_id == moneda_id)
 
     def leer_por_libro_y_moneda(self, libro_id: int,
                                 moneda_id: int) -> Optional[Precio]:
-        for precio in self.leer_todos():
-            if precio.libro_id == libro_id and precio.moneda_id == moneda_id:
-                return precio
-        return None
+        with self._conexion.transaccion() as sesion:
+            return self._buscar_uno(sesion, PrecioModel.libro_id == libro_id,
+                                    PrecioModel.moneda_id == moneda_id)
 
     def eliminar_por_libro(self, libro_id: int) -> int:
         """Elimina todos los precios de un libro y devuelve cuántos borró."""
-        precios = self.leer_todos()
-        restantes = [p for p in precios if p.libro_id != libro_id]
-        eliminados = len(precios) - len(restantes)
-        if eliminados:
-            self._almacen.escribir(restantes)
-        return eliminados
+        with self._conexion.transaccion() as sesion:
+            resultado = sesion.execute(
+                delete(PrecioModel).where(PrecioModel.libro_id == libro_id))
+            return int(resultado.rowcount or 0)
 
 
 # ---------------------------------------------------------------------------
-# Repositorios con clave natural (sin id)
+# Repositorios con clave natural (sin id autoincremental)
 # ---------------------------------------------------------------------------
 
 class RepositorioStock(IRepositorioStock):
     """Persistencia de stock; la clave es el id del libro."""
 
-    def __init__(self, ruta: Path) -> None:
-        self._almacen: AlmacenCSV[Stock] = AlmacenCSV(ruta, Stock)
+    def __init__(self, conexion: ConexionDB) -> None:
+        self._conexion = conexion
 
-    @property
-    def ruta(self) -> Path:
-        return self._almacen.ruta
+    @staticmethod
+    def _a_entidad(modelo: StockModel) -> Stock:
+        return Stock(modelo.libro_id, modelo.cantidad, modelo.cantidad_minima)
 
     def crear(self, stock: Stock) -> Stock:
-        registros = self._almacen.leer()
-        if any(r.libro_id == stock.libro_id for r in registros):
-            raise ValueError(
-                f"Ya existe stock para el libro {stock.libro_id}.")
-        registros.append(stock)
-        self._almacen.escribir(registros)
+        with self._conexion.transaccion() as sesion:
+            if sesion.get(StockModel, stock.libro_id) is not None:
+                raise ValueError(
+                    f"Ya existe stock para el libro {stock.libro_id}.")
+            sesion.add(StockModel(libro_id=stock.libro_id,
+                                  cantidad=stock.cantidad,
+                                  cantidad_minima=stock.cantidad_minima))
         return stock
 
     def leer_por_libro(self, libro_id: int) -> Optional[Stock]:
-        for stock in self._almacen.leer():
-            if stock.libro_id == libro_id:
-                return stock
-        return None
+        with self._conexion.transaccion() as sesion:
+            registro = sesion.get(StockModel, libro_id)
+            return None if registro is None else self._a_entidad(registro)
 
     def leer_todos(self) -> List[Stock]:
-        return self._almacen.leer()
+        with self._conexion.transaccion() as sesion:
+            consulta = select(StockModel).order_by(StockModel.libro_id)
+            return [self._a_entidad(r) for r in sesion.scalars(consulta)]
 
     def actualizar(self, stock: Stock) -> Stock:
-        registros = self._almacen.leer()
-        for posicion, existente in enumerate(registros):
-            if existente.libro_id == stock.libro_id:
-                registros[posicion] = stock
-                self._almacen.escribir(registros)
-                return stock
-        raise ValueError(f"No existe stock para el libro {stock.libro_id}.")
+        with self._conexion.transaccion() as sesion:
+            registro = sesion.get(StockModel, stock.libro_id)
+            if registro is None:
+                raise ValueError(
+                    f"No existe stock para el libro {stock.libro_id}.")
+            registro.cantidad = stock.cantidad
+            registro.cantidad_minima = stock.cantidad_minima
+        return stock
 
     def eliminar(self, libro_id: int) -> bool:
-        registros = self._almacen.leer()
-        restantes = [r for r in registros if r.libro_id != libro_id]
-        if len(restantes) == len(registros):
-            return False
-        self._almacen.escribir(restantes)
-        return True
+        with self._conexion.transaccion() as sesion:
+            registro = sesion.get(StockModel, libro_id)
+            if registro is None:
+                return False
+            sesion.delete(registro)
+            return True
+
+    def contar(self) -> int:
+        with self._conexion.transaccion() as sesion:
+            return int(sesion.execute(
+                select(func.count()).select_from(StockModel)).scalar() or 0)
 
     def vaciar(self) -> None:
-        self._almacen.vaciar()
+        with self._conexion.transaccion() as sesion:
+            sesion.execute(delete(StockModel))
 
 
 class RepositorioCotizacionDolar(IRepositorioCotizacionDolar):
     """Persistencia de cotizaciones; la clave es (tipo_id, fecha)."""
 
-    def __init__(self, ruta: Path) -> None:
-        self._almacen: AlmacenCSV[CotizacionDolar] = AlmacenCSV(
-            ruta, CotizacionDolar)
+    def __init__(self, conexion: ConexionDB) -> None:
+        self._conexion = conexion
 
-    @property
-    def ruta(self) -> Path:
-        return self._almacen.ruta
+    @staticmethod
+    def _a_entidad(modelo: CotizacionModel) -> CotizacionDolar:
+        return CotizacionDolar(modelo.tipo_id, modelo.fecha, modelo.compra,
+                               modelo.venta)
 
     def crear(self, cotizacion: CotizacionDolar) -> CotizacionDolar:
-        registros = self._almacen.leer()
-        if any(r.tipo_id == cotizacion.tipo_id and r.fecha == cotizacion.fecha
-               for r in registros):
-            raise ValueError(
-                f"Ya existe una cotización del tipo {cotizacion.tipo_id} "
-                f"para la fecha {cotizacion.fecha}.")
-        registros.append(cotizacion)
-        self._almacen.escribir(registros)
+        with self._conexion.transaccion() as sesion:
+            clave = (cotizacion.tipo_id, cotizacion.fecha)
+            if sesion.get(CotizacionModel, clave) is not None:
+                raise ValueError(
+                    f"Ya existe una cotización del tipo {cotizacion.tipo_id}"
+                    f" para la fecha {cotizacion.fecha}.")
+            sesion.add(CotizacionModel(tipo_id=cotizacion.tipo_id,
+                                       fecha=cotizacion.fecha,
+                                       compra=cotizacion.compra,
+                                       venta=cotizacion.venta))
         return cotizacion
 
     def leer_por_tipo_y_fecha(
             self, tipo_id: int,
             fecha: datetime.date) -> Optional[CotizacionDolar]:
-        for cotizacion in self._almacen.leer():
-            if cotizacion.tipo_id == tipo_id and cotizacion.fecha == fecha:
-                return cotizacion
-        return None
+        with self._conexion.transaccion() as sesion:
+            registro = sesion.get(CotizacionModel, (tipo_id, fecha))
+            return None if registro is None else self._a_entidad(registro)
 
     def leer_historico_por_tipo(self, tipo_id: int) -> List[CotizacionDolar]:
-        historico = [c for c in self._almacen.leer() if c.tipo_id == tipo_id]
-        return sorted(historico, key=lambda c: c.fecha)
+        with self._conexion.transaccion() as sesion:
+            consulta = (select(CotizacionModel)
+                        .where(CotizacionModel.tipo_id == tipo_id)
+                        .order_by(CotizacionModel.fecha))
+            return [self._a_entidad(r) for r in sesion.scalars(consulta)]
 
     def leer_ultima_por_tipo(self, tipo_id: int) -> Optional[CotizacionDolar]:
         """Devuelve la cotización más reciente de un tipo, si existe."""
-        historico = self.leer_historico_por_tipo(tipo_id)
-        return historico[-1] if historico else None
+        with self._conexion.transaccion() as sesion:
+            consulta = (select(CotizacionModel)
+                        .where(CotizacionModel.tipo_id == tipo_id)
+                        .order_by(CotizacionModel.fecha.desc()).limit(1))
+            registro = sesion.scalars(consulta).first()
+            return None if registro is None else self._a_entidad(registro)
 
     def leer_todos(self) -> List[CotizacionDolar]:
-        return sorted(self._almacen.leer(), key=lambda c: (c.tipo_id, c.fecha))
+        with self._conexion.transaccion() as sesion:
+            consulta = select(CotizacionModel).order_by(
+                CotizacionModel.tipo_id, CotizacionModel.fecha)
+            return [self._a_entidad(r) for r in sesion.scalars(consulta)]
 
     def actualizar(self, cotizacion: CotizacionDolar) -> CotizacionDolar:
-        registros = self._almacen.leer()
-        for posicion, existente in enumerate(registros):
-            if (existente.tipo_id == cotizacion.tipo_id
-                    and existente.fecha == cotizacion.fecha):
-                registros[posicion] = cotizacion
-                self._almacen.escribir(registros)
-                return cotizacion
-        raise ValueError(
-            f"No existe una cotización del tipo {cotizacion.tipo_id} "
-            f"para la fecha {cotizacion.fecha}.")
+        with self._conexion.transaccion() as sesion:
+            registro = sesion.get(
+                CotizacionModel, (cotizacion.tipo_id, cotizacion.fecha))
+            if registro is None:
+                raise ValueError(
+                    f"No existe una cotización del tipo {cotizacion.tipo_id}"
+                    f" para la fecha {cotizacion.fecha}.")
+            registro.compra = cotizacion.compra
+            registro.venta = cotizacion.venta
+        return cotizacion
 
     def eliminar(self, tipo_id: int, fecha: datetime.date) -> bool:
-        registros = self._almacen.leer()
-        restantes = [r for r in registros
-                     if not (r.tipo_id == tipo_id and r.fecha == fecha)]
-        if len(restantes) == len(registros):
-            return False
-        self._almacen.escribir(restantes)
-        return True
+        with self._conexion.transaccion() as sesion:
+            registro = sesion.get(CotizacionModel, (tipo_id, fecha))
+            if registro is None:
+                return False
+            sesion.delete(registro)
+            return True
+
+    def contar(self) -> int:
+        with self._conexion.transaccion() as sesion:
+            return int(sesion.execute(select(func.count()).select_from(
+                CotizacionModel)).scalar() or 0)
 
     def vaciar(self) -> None:
-        self._almacen.vaciar()
+        with self._conexion.transaccion() as sesion:
+            sesion.execute(delete(CotizacionModel))
 
 
 # ---------------------------------------------------------------------------
@@ -587,21 +676,17 @@ class Repositorios:
     cotizaciones: RepositorioCotizacionDolar
 
     @classmethod
-    def desde_directorio(cls, directorio: Path) -> "Repositorios":
-        """Crea todos los repositorios apuntando a un directorio de CSV."""
-        directorio = Path(directorio)
-        directorio.mkdir(parents=True, exist_ok=True)
+    def desde_conexion(cls, conexion: ConexionDB) -> "Repositorios":
+        """Crea todos los repositorios sobre la misma conexión."""
         return cls(
-            generos=RepositorioGenero(directorio / "generos.csv"),
-            editoriales=RepositorioEditorial(directorio / "editoriales.csv"),
-            monedas=RepositorioMoneda(directorio / "monedas.csv"),
-            tipos_cotizacion=RepositorioTipoCotizacion(
-                directorio / "tipos_cotizacion.csv"),
-            libros=RepositorioLibro(directorio / "libros.csv"),
-            precios=RepositorioPrecio(directorio / "precios.csv"),
-            stock=RepositorioStock(directorio / "stock.csv"),
-            cotizaciones=RepositorioCotizacionDolar(
-                directorio / "cotizaciones_dolar.csv"),
+            generos=RepositorioGenero(conexion),
+            editoriales=RepositorioEditorial(conexion),
+            monedas=RepositorioMoneda(conexion),
+            tipos_cotizacion=RepositorioTipoCotizacion(conexion),
+            libros=RepositorioLibro(conexion),
+            precios=RepositorioPrecio(conexion),
+            stock=RepositorioStock(conexion),
+            cotizaciones=RepositorioCotizacionDolar(conexion),
         )
 
     def todos(self) -> List[Any]:
@@ -610,6 +695,11 @@ class Repositorios:
                 self.tipos_cotizacion, self.libros, self.precios,
                 self.stock, self.cotizaciones]
 
-    def archivos_existen(self) -> bool:
-        """Indica si todos los archivos CSV ya fueron creados."""
-        return all(Path(repo.ruta).exists() for repo in self.todos())
+    def esta_vacia(self) -> bool:
+        """Indica si ninguna tabla del sistema tiene registros."""
+        return all(repositorio.contar() == 0 for repositorio in self.todos())
+
+    def vaciar(self) -> None:
+        """Borra los datos de todas las tablas (en orden inverso de carga)."""
+        for repositorio in reversed(self.todos()):
+            repositorio.vaciar()
