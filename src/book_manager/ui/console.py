@@ -4,22 +4,33 @@ La clase ``ConsolaUI`` muestra un menú principal con un submenú de
 ABM (Listar / Alta / Modificar / Baja) por cada entidad y un menú de
 reportes. Toda la lógica de negocio queda en los servicios; acá solo se
 piden datos por teclado, se validan los formatos y se muestran tablas.
+
+Sprint 2 (Ejercicio 08): se agregan al menú principal las opciones para
+obtener las cotizaciones por API, ver la lista de precios bimonetaria
+(pesos y otra moneda seleccionada) y exportar los precios a CSV para
+todas las monedas con cotización.
 """
 from __future__ import annotations
 
 import datetime
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from book_manager.database.connection import RAIZ_PROYECTO
 from book_manager.entities.entities import (
     CotizacionDolar, Editorial, Genero, Libro, Moneda, Precio, Stock,
     TipoCotizacion, fecha_desde,
 )
-from book_manager.services.services import Servicios
+from book_manager.services.services import (
+    CODIGO_DOLAR, ColumnaMoneda, Servicios,
+)
 
 Accion = Callable[[], None]
 Opciones = Dict[str, Tuple[str, Accion]]
 
 ANCHO = 72
+CARPETA_EXPORTACION = RAIZ_PROYECTO / "exports"
+ARCHIVO_EXPORTACION = "precios_todas_las_monedas.csv"
 
 
 def formato_importe(valor: float) -> str:
@@ -48,10 +59,16 @@ class ConsolaUI:
             "5": ("Tipos de cotización", self._menu_tipos_cotizacion),
             "6": ("Precios", self._menu_precios),
             "7": ("Stock", self._menu_stock),
-            "8": ("Cotizaciones del dólar", self._menu_cotizaciones),
+            "8": ("Cotizaciones", self._menu_cotizaciones),
             "9": ("Reportes", self._menu_reportes),
+            "10": ("Obtener las cotizaciones por API",
+                   self._obtener_cotizaciones_api),
+            "11": ("Lista de precios bimonetaria (pesos y otra moneda)",
+                   self._lista_precios_bimonetaria),
+            "12": ("Exportar precios a CSV (todas las monedas)",
+                   self._exportar_precios_csv),
         }
-        self._titulo("BOOK MANAGER - Sprint 1")
+        self._titulo("BOOK MANAGER - Sprint 2")
         self._bucle_menu("Menú principal", opciones, "Salir")
         print("Hasta luego.")
 
@@ -194,7 +211,8 @@ class ConsolaUI:
 
     def _nombre_tipo(self, tipo_id: int) -> str:
         try:
-            return self._s.tipos_cotizacion.obtener(tipo_id).nombre
+            tipo = self._s.tipos_cotizacion.obtener(tipo_id)
+            return f"{self._codigo_moneda(tipo.moneda_id)} {tipo.nombre}"
         except ValueError:
             return f"? ({tipo_id})"
 
@@ -319,15 +337,18 @@ class ConsolaUI:
                        self._baja_tipo)
 
     def _listar_tipos(self) -> None:
-        filas = [(t.id, t.nombre, t.descripcion)
+        filas = [(t.id, self._codigo_moneda(t.moneda_id), t.nombre,
+                  t.descripcion)
                  for t in self._s.tipos_cotizacion.listar()]
-        self._imprimir_tabla(("ID", "Nombre", "Descripción"), filas)
+        self._imprimir_tabla(("ID", "Moneda", "Nombre", "Descripción"), filas)
 
     def _alta_tipo(self) -> None:
+        self._listar_monedas()
+        moneda_id = self._pedir_int("ID de moneda")
         nombre = self._pedir_texto("Nombre")
         descripcion = self._pedir_texto("Descripción", obligatorio=False)
         tipo = self._s.tipos_cotizacion.crear(
-            TipoCotizacion(nombre, descripcion))
+            TipoCotizacion(nombre, descripcion, moneda_id))
         print(f"Tipo de cotización creado con id {tipo.id}.")
 
     def _modificar_tipo(self) -> None:
@@ -337,6 +358,8 @@ class ConsolaUI:
         tipo.nombre = self._pedir_texto("Nombre", actual=tipo.nombre)
         tipo.descripcion = self._pedir_texto(
             "Descripción", obligatorio=False, actual=tipo.descripcion)
+        tipo.moneda_id = self._pedir_int("ID de moneda",
+                                         actual=tipo.moneda_id)
         self._s.tipos_cotizacion.actualizar(tipo)
         print("Tipo de cotización actualizado.")
 
@@ -537,13 +560,17 @@ class ConsolaUI:
         print(f"Stock actual: {stock.cantidad} unidades.")
 
     # ------------------------------------------------------------------
-    # Cotizaciones del dólar
+    # Cotizaciones
     # ------------------------------------------------------------------
 
     def _menu_cotizaciones(self) -> None:
-        self._menu_abm("Cotizaciones del dólar", self._listar_cotizaciones,
+        extras: Opciones = {
+            "5": ("Obtener las cotizaciones por API",
+                  self._obtener_cotizaciones_api),
+        }
+        self._menu_abm("Cotizaciones", self._listar_cotizaciones,
                        self._alta_cotizacion, self._modificar_cotizacion,
-                       self._baja_cotizacion)
+                       self._baja_cotizacion, extras)
 
     def _tabla_cotizaciones(self, cotizaciones: List[CotizacionDolar]
                             ) -> None:
@@ -588,6 +615,91 @@ class ConsolaUI:
             print("Cotización eliminada.")
 
     # ------------------------------------------------------------------
+    # Sprint 2 - Ejercicio 08: API, lista bimonetaria y exportación
+    # ------------------------------------------------------------------
+
+    def _obtener_cotizaciones_api(self) -> None:
+        """Descarga las cotizaciones de la API y las registra en la base."""
+        print(f"Consultando {self._s.cotizaciones.cliente_api.url} ...")
+        importadas = self._s.cotizaciones.obtener_cotizaciones()
+        filas = [(i.moneda.codigo, i.tipo.nombre, i.cotizacion.fecha,
+                  formato_importe(i.cotizacion.compra),
+                  formato_importe(i.cotizacion.venta),
+                  "alta" if i.nueva else "actualizada")
+                 for i in importadas]
+        self._imprimir_tabla(
+            ("Moneda", "Tipo", "Fecha", "Compra", "Venta", "Operación"),
+            filas)
+        nuevas = sum(1 for i in importadas if i.nueva)
+        print(f"Cotizaciones registradas: {nuevas} nueva(s), "
+              f"{len(importadas) - nuevas} actualizada(s).")
+
+    def _tabla_columnas(self, columnas: Sequence[ColumnaMoneda]) -> None:
+        filas = [(c.tipo.id, c.moneda.codigo, c.tipo.nombre,
+                  c.cotizacion.fecha, formato_importe(c.cotizacion.venta))
+                 for c in columnas]
+        self._imprimir_tabla(
+            ("Tipo ID", "Moneda", "Tipo", "Fecha", "Venta"), filas)
+
+    def _pedir_tipo_dolar(self, columnas: Sequence[ColumnaMoneda]) -> int:
+        """Pide el tipo de dólar que se usa para pasar a pesos."""
+        dolares = [c for c in columnas if c.moneda.codigo == CODIGO_DOLAR]
+        if not dolares:
+            raise ValueError("No hay cotizaciones del dólar registradas.")
+        print("\nTipo de dólar para valuar en pesos los precios en USD:")
+        self._tabla_columnas(dolares)
+        return self._pedir_int("ID de tipo de dólar",
+                               actual=dolares[0].tipo.id)
+
+    def _lista_precios_bimonetaria(self) -> None:
+        """Precios de los libros en pesos y en otra moneda seleccionada."""
+        columnas = self._s.cotizador.monedas_con_cotizacion()
+        if not columnas:
+            raise ValueError("No hay cotizaciones registradas: use la "
+                             "opción 'Obtener las cotizaciones por API'.")
+        print("\nMonedas y tipos de cotización disponibles:")
+        self._tabla_columnas(columnas)
+        tipo_moneda_id = self._pedir_int(
+            "ID de tipo (moneda en la que se expresa la segunda columna)")
+        tipo = self._s.tipos_cotizacion.obtener(tipo_moneda_id)
+        moneda = self._s.monedas.obtener(tipo.moneda_id)
+        if moneda.codigo == CODIGO_DOLAR:
+            tipo_dolar_id = tipo_moneda_id
+        else:
+            tipo_dolar_id = self._pedir_tipo_dolar(columnas)
+        lista = self._s.cotizador.lista_precios_bimonetaria(
+            tipo_dolar_id, tipo_moneda_id)
+        if not lista:
+            print("(sin libros cotizables)")
+            return
+        cotizacion = lista[0].cotizacion
+        print(f"\nLista de precios en ARS y {moneda.codigo} "
+              f"({tipo.nombre}, cotización del {cotizacion.fecha}: "
+              f"venta {formato_importe(cotizacion.venta)})")
+        filas = [(p.libro.id, p.libro.titulo,
+                  f"{p.moneda_lista.codigo} {formato_importe(p.precio.valor)}",
+                  formato_importe(p.valor_ars),
+                  formato_importe(p.valor_moneda))
+                 for p in lista]
+        self._imprimir_tabla(
+            ("ID", "Título", "Precio de lista", "ARS", moneda.codigo), filas)
+
+    def _exportar_precios_csv(self) -> None:
+        """Exporta a CSV los precios en pesos y en todas las monedas."""
+        columnas = self._s.cotizador.monedas_con_cotizacion()
+        if not columnas:
+            raise ValueError("No hay cotizaciones registradas: use la "
+                             "opción 'Obtener las cotizaciones por API'.")
+        tipo_dolar_id = self._pedir_tipo_dolar(columnas)
+        ruta = Path(self._pedir_texto(
+            "Archivo de destino",
+            actual=str(CARPETA_EXPORTACION / ARCHIVO_EXPORTACION)))
+        ruta, libros, monedas = self._s.cotizador.exportar_precios_csv(
+            ruta, tipo_dolar_id)
+        print(f"Se exportaron {libros} libro(s) en ARS y {monedas} "
+              f"columna(s) de moneda/tipo a:\n  {ruta}")
+
+    # ------------------------------------------------------------------
     # Reportes
     # ------------------------------------------------------------------
 
@@ -601,6 +713,10 @@ class ConsolaUI:
                   self._reporte_valor_inventario),
             "5": ("Histórico de cotizaciones por tipo",
                   self._reporte_historico),
+            "6": ("Lista de precios bimonetaria",
+                  self._lista_precios_bimonetaria),
+            "7": ("Exportar precios a CSV (todas las monedas)",
+                  self._exportar_precios_csv),
         }
         self._bucle_menu("Reportes", opciones)
 
