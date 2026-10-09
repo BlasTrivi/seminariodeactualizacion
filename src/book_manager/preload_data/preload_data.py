@@ -1,24 +1,38 @@
-"""Datos iniciales del sistema y su carga en ``migrations/csv``.
+"""Datos iniciales del sistema y generación de los archivos CSV.
 
-Cada lista contiene al menos 10 registros. La función
-``cargar_datos_iniciales`` vacía los archivos CSV y vuelve a crear cada
-registro a través de los repositorios, de modo que los archivos quedan
-generados con el mismo código que usa el sistema en producción.
+Cada lista contiene al menos 10 registros. En el Sprint 1 los CSV eran la
+persistencia del sistema; en el Sprint 2 pasan a ser el *origen* de la
+migración hacia la base de datos (``migrations/migrations.py``). Por eso
+``cargar_datos_iniciales`` ya no escribe a través de los repositorios sino
+que regenera los archivos de ``migrations/csv`` con el mismo formato.
 """
 from __future__ import annotations
 
+import csv
 import datetime
-from typing import List
+from pathlib import Path
+from typing import Dict, Iterable, List, Sequence, Type
 
 from book_manager.entities.entities import (
-    CotizacionDolar, Editorial, Genero, Libro, Moneda, Precio, Stock,
-    TipoCotizacion,
+    CotizacionDolar, Editorial, Genero, Libro, Moneda, Precio, Serializable,
+    Stock, TipoCotizacion,
 )
-from book_manager.repositories.repositories import Repositorios
 
 # Ids de referencia para armar las relaciones entre entidades.
 ARS = 1
 USD = 2
+
+#: Nombre de archivo CSV de cada entidad (misma nomenclatura del TP1).
+ARCHIVOS_CSV: Dict[str, str] = {
+    "generos": "generos.csv",
+    "editoriales": "editoriales.csv",
+    "monedas": "monedas.csv",
+    "tipos_cotizacion": "tipos_cotizacion.csv",
+    "libros": "libros.csv",
+    "precios": "precios.csv",
+    "stock": "stock.csv",
+    "cotizaciones": "cotizaciones_dolar.csv",
+}
 
 
 def generos() -> List[Genero]:
@@ -73,23 +87,26 @@ def monedas() -> List[Moneda]:
 
 
 def tipos_cotizacion() -> List[TipoCotizacion]:
+    """Tipos de cambio del dólar (todos pertenecen a la moneda USD)."""
     return [
-        TipoCotizacion("Oficial", "Cotización del Banco Nación", id=1),
-        TipoCotizacion("Blue", "Mercado informal", id=2),
+        TipoCotizacion("Oficial", "Cotización del Banco Nación", USD, id=1),
+        TipoCotizacion("Blue", "Mercado informal", USD, id=2),
         TipoCotizacion("MEP", "Dólar Bolsa (mercado electrónico de pagos)",
-                       id=3),
-        TipoCotizacion("CCL", "Contado con liquidación", id=4),
+                       USD, id=3),
+        TipoCotizacion("CCL", "Contado con liquidación", USD, id=4),
         TipoCotizacion("Tarjeta", "Consumos en el exterior con tarjeta",
-                       id=5),
-        TipoCotizacion("Mayorista", "Mercado mayorista (BCRA)", id=6),
+                       USD, id=5),
+        TipoCotizacion("Mayorista", "Mercado mayorista (BCRA)", USD, id=6),
         TipoCotizacion("Cripto", "Cotización en exchanges de criptomonedas",
-                       id=7),
-        TipoCotizacion("Ahorro", "Dólar ahorro / solidario", id=8),
-        TipoCotizacion("Turista", "Gastos de turismo en el exterior", id=9),
-        TipoCotizacion("Exportación", "Liquidación de exportaciones", id=10),
+                       USD, id=7),
+        TipoCotizacion("Ahorro", "Dólar ahorro / solidario", USD, id=8),
+        TipoCotizacion("Turista", "Gastos de turismo en el exterior", USD,
+                       id=9),
+        TipoCotizacion("Exportación", "Liquidación de exportaciones", USD,
+                       id=10),
         TipoCotizacion("Qatar", "Consumos con tarjeta sobre el tope "
-                       "(histórico)", id=11),
-        TipoCotizacion("Futuro", "Contratos de dólar futuro", id=12),
+                       "(histórico)", USD, id=11),
+        TipoCotizacion("Futuro", "Contratos de dólar futuro", USD, id=12),
     ]
 
 
@@ -190,28 +207,56 @@ def cotizaciones() -> List[CotizacionDolar]:
     ]
 
 
-def cargar_datos_iniciales(repos: Repositorios) -> None:
-    """Regenera los archivos CSV con los datos iniciales.
+def escribir_csv(ruta: Path, clase: Type[Serializable],
+                 entidades: Iterable[Serializable]) -> int:
+    """Escribe las entidades en un CSV usando las columnas de ``CAMPOS``.
 
-    Se vacían los repositorios y se crea cada registro mediante ``crear``,
-    en el orden que respeta las relaciones (primero catálogos, luego
-    libros y por último precios, stock y cotizaciones).
+    Args:
+        ruta (Path): Archivo de destino (se sobrescribe).
+        clase (Type[Serializable]): Clase de la entidad (define columnas).
+        entidades (Iterable[Serializable]): Registros a escribir.
+
+    Returns:
+        int: Cantidad de filas escritas.
     """
-    for repositorio in repos.todos():
-        repositorio.vaciar()
-    for genero in generos():
-        repos.generos.crear(genero)
-    for editorial in editoriales():
-        repos.editoriales.crear(editorial)
-    for moneda in monedas():
-        repos.monedas.crear(moneda)
-    for tipo in tipos_cotizacion():
-        repos.tipos_cotizacion.crear(tipo)
-    for libro in libros():
-        repos.libros.crear(libro)
-    for precio in precios():
-        repos.precios.crear(precio)
-    for registro in stock():
-        repos.stock.crear(registro)
-    for cotizacion in cotizaciones():
-        repos.cotizaciones.crear(cotizacion)
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    filas = 0
+    with ruta.open("w", newline="", encoding="utf-8") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=clase.CAMPOS,
+                                  lineterminator="\n")
+        escritor.writeheader()
+        for entidad in entidades:
+            escritor.writerow(entidad.a_dict())
+            filas += 1
+    return filas
+
+
+def archivos_csv_existen(carpeta_csvs: Path) -> bool:
+    """Indica si están todos los archivos CSV de origen en la carpeta."""
+    carpeta = Path(carpeta_csvs)
+    return all((carpeta / nombre).exists() for nombre in ARCHIVOS_CSV.values())
+
+
+def cargar_datos_iniciales(carpeta_csvs: Path) -> Dict[str, int]:
+    """Regenera los archivos CSV de origen con los datos iniciales.
+
+    Args:
+        carpeta_csvs (Path): Carpeta ``migrations/csv`` donde se escriben.
+
+    Returns:
+        Dict[str, int]: Cantidad de registros escritos por archivo.
+    """
+    carpeta = Path(carpeta_csvs)
+    contenido: Sequence = (
+        (ARCHIVOS_CSV["generos"], Genero, generos()),
+        (ARCHIVOS_CSV["editoriales"], Editorial, editoriales()),
+        (ARCHIVOS_CSV["monedas"], Moneda, monedas()),
+        (ARCHIVOS_CSV["tipos_cotizacion"], TipoCotizacion,
+         tipos_cotizacion()),
+        (ARCHIVOS_CSV["libros"], Libro, libros()),
+        (ARCHIVOS_CSV["precios"], Precio, precios()),
+        (ARCHIVOS_CSV["stock"], Stock, stock()),
+        (ARCHIVOS_CSV["cotizaciones"], CotizacionDolar, cotizaciones()),
+    )
+    return {nombre: escribir_csv(carpeta / nombre, clase, entidades)
+            for nombre, clase, entidades in contenido}

@@ -1,0 +1,20 @@
+-- Tabla: cotizaciones
+-- Origen: cotizaciones_dolar.csv
+-- Registros: 15
+-- Generado por book_manager/migrations/migrations.py
+
+INSERT INTO cotizaciones (tipo_id, fecha, compra, venta) VALUES (1, '2026-09-17', 1440.00, 1480.00);
+INSERT INTO cotizaciones (tipo_id, fecha, compra, venta) VALUES (1, '2026-09-18', 1445.00, 1485.00);
+INSERT INTO cotizaciones (tipo_id, fecha, compra, venta) VALUES (1, '2026-09-21', 1450.00, 1490.00);
+INSERT INTO cotizaciones (tipo_id, fecha, compra, venta) VALUES (2, '2026-09-17', 1470.00, 1490.00);
+INSERT INTO cotizaciones (tipo_id, fecha, compra, venta) VALUES (2, '2026-09-18', 1475.00, 1495.00);
+INSERT INTO cotizaciones (tipo_id, fecha, compra, venta) VALUES (2, '2026-09-21', 1480.00, 1500.00);
+INSERT INTO cotizaciones (tipo_id, fecha, compra, venta) VALUES (3, '2026-09-17', 1462.00, 1466.00);
+INSERT INTO cotizaciones (tipo_id, fecha, compra, venta) VALUES (3, '2026-09-18', 1468.00, 1472.00);
+INSERT INTO cotizaciones (tipo_id, fecha, compra, venta) VALUES (3, '2026-09-21', 1473.00, 1477.00);
+INSERT INTO cotizaciones (tipo_id, fecha, compra, venta) VALUES (4, '2026-09-17', 1478.00, 1483.00);
+INSERT INTO cotizaciones (tipo_id, fecha, compra, venta) VALUES (4, '2026-09-18', 1484.00, 1489.00);
+INSERT INTO cotizaciones (tipo_id, fecha, compra, venta) VALUES (4, '2026-09-21', 1490.00, 1495.00);
+INSERT INTO cotizaciones (tipo_id, fecha, compra, venta) VALUES (5, '2026-09-17', 1872.00, 1924.00);
+INSERT INTO cotizaciones (tipo_id, fecha, compra, venta) VALUES (5, '2026-09-18', 1878.00, 1930.00);
+INSERT INTO cotizaciones (tipo_id, fecha, compra, venta) VALUES (5, '2026-09-21', 1885.00, 1937.00);
