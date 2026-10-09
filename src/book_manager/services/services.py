@@ -5,13 +5,27 @@ encargan de las validaciones que no pertenecen a una sola entidad:
 unicidad (nombres, códigos, ISBN), integridad referencial (que exista el
 género, la editorial, la moneda, el libro...), borrados bloqueados o en
 cascada y los reportes que combinan varias entidades.
+
+Sprint 2:
+
+- ``ServicioCotizacionDolar.obtener_cotizaciones`` consulta la API del
+  dólar (URL en ``.env``), descarga las cotizaciones y las registra en la
+  base de datos (Ejercicio 07).
+- ``ServicioCotizador`` suma la lista de precios bimonetaria (pesos y
+  otra moneda seleccionada) y la exportación a CSV de los precios en
+  todas las monedas con cotización (Ejercicio 08).
 """
 from __future__ import annotations
 
+import csv
 import datetime
 from dataclasses import dataclass
-from typing import Dict, Generic, List, Optional, Tuple, TypeVar
+from pathlib import Path
+from typing import Any, Dict, Generic, List, Optional, Sequence, Tuple, TypeVar
 
+import requests
+
+from book_manager.database.connection import variable_entorno
 from book_manager.entities.entities import (
     CotizacionDolar, Editorial, EntidadBase, Genero, Libro, Moneda, Precio,
     Stock, TipoCotizacion,
@@ -27,6 +41,22 @@ T = TypeVar("T", bound=EntidadBase)
 
 CODIGO_PESO = "ARS"
 CODIGO_DOLAR = "USD"
+
+#: Variables del ``.env`` con las URL de la API (Ejercicio 07).
+VARIABLE_API_URL = "API_URL"
+VARIABLE_API_URL_COTIZACIONES = "API_URL_COTIZACIONES"
+TIEMPO_ESPERA_API = 15  # segundos
+
+#: Nombre que usa el sistema para cada "casa" de la API del dólar.
+NOMBRES_CASAS_API: Dict[str, str] = {
+    "oficial": "Oficial",
+    "blue": "Blue",
+    "bolsa": "MEP",
+    "contadoconliqui": "CCL",
+    "tarjeta": "Tarjeta",
+    "mayorista": "Mayorista",
+    "cripto": "Cripto",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -133,10 +163,12 @@ class ServicioMoneda(ServicioBase[Moneda]):
     nombre_entidad = "una moneda"
 
     def __init__(self, repositorio: RepositorioMoneda,
-                 repo_precios: RepositorioPrecio) -> None:
+                 repo_precios: RepositorioPrecio,
+                 repo_tipos: RepositorioTipoCotizacion) -> None:
         super().__init__(repositorio)
         self._repo_monedas = repositorio
         self._repo_precios = repo_precios
+        self._repo_tipos = repo_tipos
 
     def obtener_por_codigo(self, codigo: str) -> Moneda:
         moneda = self._repo_monedas.leer_por_codigo(codigo)
@@ -157,6 +189,11 @@ class ServicioMoneda(ServicioBase[Moneda]):
             raise ValueError(
                 f"No se puede eliminar: hay {cantidad} precio(s) en esa "
                 "moneda.")
+        cantidad = len(self._repo_tipos.leer_por_moneda(id))
+        if cantidad:
+            raise ValueError(
+                f"No se puede eliminar: hay {cantidad} tipo(s) de "
+                "cotización de esa moneda.")
 
 
 class ServicioTipoCotizacion(ServicioBase[TipoCotizacion]):
@@ -165,12 +202,26 @@ class ServicioTipoCotizacion(ServicioBase[TipoCotizacion]):
     nombre_entidad = "un tipo de cotización"
 
     def __init__(self, repositorio: RepositorioTipoCotizacion,
-                 repo_cotizaciones: RepositorioCotizacionDolar) -> None:
+                 repo_cotizaciones: RepositorioCotizacionDolar,
+                 repo_monedas: RepositorioMoneda) -> None:
         super().__init__(repositorio)
+        self._repo_tipos = repositorio
         self._repo_cotizaciones = repo_cotizaciones
+        self._repo_monedas = repo_monedas
+
+    def listar_por_moneda(self, moneda_id: int) -> List[TipoCotizacion]:
+        return self._repo_tipos.leer_por_moneda(moneda_id)
 
     def _validar(self, entidad: TipoCotizacion) -> None:
-        self._validar_nombre_unico(entidad, entidad.nombre)
+        if self._repo_monedas.leer_por_id(entidad.moneda_id) is None:
+            raise ValueError(
+                f"No existe una moneda con id {entidad.moneda_id}.")
+        existente = self._repo_tipos.leer_por_nombre(entidad.nombre,
+                                                     entidad.moneda_id)
+        if existente is not None and existente.id != entidad.id:
+            raise ValueError(
+                f"Ya existe el tipo de cotización '{entidad.nombre}' para "
+                "esa moneda.")
 
     def _validar_eliminacion(self, id: int) -> None:
         cantidad = len(self._repo_cotizaciones.leer_historico_por_tipo(id))
@@ -236,12 +287,15 @@ class ServicioLibro(ServicioBase[Libro]):
                 f"'{existente.titulo}'.")
 
     def eliminar(self, id: int) -> bool:
-        """Elimina el libro y, en cascada, sus precios y su stock."""
-        eliminado = super().eliminar(id)
-        if eliminado:
-            self._repo_precios.eliminar_por_libro(id)
-            self._repo_stock.eliminar(id)
-        return eliminado
+        """Elimina el libro y, en cascada, sus precios y su stock.
+
+        Primero se borran los registros dependientes y luego el libro,
+        de modo que las claves foráneas de la base nunca queden rotas.
+        """
+        self.obtener(id)
+        self._repo_precios.eliminar_por_libro(id)
+        self._repo_stock.eliminar(id)
+        return self._repositorio.eliminar(id)
 
 
 # ---------------------------------------------------------------------------
@@ -333,13 +387,84 @@ class ServicioStock:
             raise ValueError(f"No existe un libro con id {stock.libro_id}.")
 
 
+# ---------------------------------------------------------------------------
+# Cotizaciones: CRUD + consulta a la API externa (Ejercicio 07)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CotizacionImportada:
+    """Resultado de registrar una cotización descargada de la API."""
+
+    moneda: Moneda
+    tipo: TipoCotizacion
+    cotizacion: CotizacionDolar
+    nueva: bool  # True si se creó, False si se actualizó la del día
+
+
+class ClienteCotizacionesAPI:
+    """Descarga las cotizaciones publicadas por la API (dolarapi.com).
+
+    Las URL se leen del archivo ``.env`` (``API_URL`` para los distintos
+    tipos de dólar y, opcionalmente, ``API_URL_COTIZACIONES`` para las
+    demás monedas). Cada registro devuelto tiene las claves ``moneda``,
+    ``casa``, ``nombre``, ``compra``, ``venta`` y ``fechaActualizacion``.
+    """
+
+    def __init__(self, url: Optional[str] = None,
+                 url_cotizaciones: Optional[str] = None) -> None:
+        self._url = url or variable_entorno(VARIABLE_API_URL)
+        self._url_cotizaciones = url_cotizaciones or variable_entorno(
+            VARIABLE_API_URL_COTIZACIONES, "")
+
+    @property
+    def url(self) -> str:
+        return self._url
+
+    @staticmethod
+    def _descargar(url: str) -> List[Dict[str, Any]]:
+        try:
+            respuesta = requests.get(url, timeout=TIEMPO_ESPERA_API)
+            respuesta.raise_for_status()
+            datos = respuesta.json()
+        except requests.RequestException as error:
+            raise ValueError(
+                f"No se pudo consultar la API ({url}): {error}") from error
+        except ValueError as error:
+            raise ValueError(
+                f"La API ({url}) no devolvió un JSON válido.") from error
+        if isinstance(datos, dict):
+            datos = [datos]
+        if not isinstance(datos, list):
+            raise ValueError(f"Respuesta inesperada de la API ({url}).")
+        return datos
+
+    def buscar_dolares(self) -> List[Dict[str, Any]]:
+        """Cotizaciones del dólar por casa (API_URL)."""
+        return self._descargar(self._url)
+
+    def buscar_otras_monedas(self) -> List[Dict[str, Any]]:
+        """Cotizaciones de otras monedas (vacío si no está configurada)."""
+        if not self._url_cotizaciones:
+            return []
+        registros = self._descargar(self._url_cotizaciones)
+        return [registro for registro in registros
+                if str(registro.get("moneda", "")).upper() != CODIGO_DOLAR]
+
+
 class ServicioCotizacionDolar:
     """Reglas de negocio para cotizaciones (clave: tipo y fecha)."""
 
     def __init__(self, repositorio: RepositorioCotizacionDolar,
-                 repo_tipos: RepositorioTipoCotizacion) -> None:
+                 repo_tipos: RepositorioTipoCotizacion,
+                 repo_monedas: RepositorioMoneda,
+                 cliente_api: Optional[ClienteCotizacionesAPI] = None
+                 ) -> None:
         self._repositorio = repositorio
         self._repo_tipos = repo_tipos
+        self._repo_monedas = repo_monedas
+        self._cliente_api = cliente_api
+
+    # -- CRUD -------------------------------------------------------------
 
     def listar(self) -> List[CotizacionDolar]:
         return self._repositorio.leer_todos()
@@ -388,9 +513,105 @@ class ServicioCotizacionDolar:
             raise ValueError(
                 "El valor de compra no puede superar al de venta.")
 
+    # -- API externa (Ejercicio 07) ---------------------------------------
+
+    @property
+    def cliente_api(self) -> ClienteCotizacionesAPI:
+        if self._cliente_api is None:
+            self._cliente_api = ClienteCotizacionesAPI()
+        return self._cliente_api
+
+    def obtener_cotizaciones(self) -> List[CotizacionImportada]:
+        """Busca, descarga y registra en la base las cotizaciones de la API.
+
+        Para cada registro devuelto por la API se resuelve la moneda (se
+        crea si no existe), el tipo de cotización (idem) y se guarda la
+        cotización del día: si ya había una para ese tipo y fecha se
+        actualiza con los valores nuevos.
+
+        Returns:
+            List[CotizacionImportada]: Una entrada por cotización
+                registrada, indicando si fue alta o modificación.
+
+        Raises:
+            ValueError: Si la API no responde o devuelve datos inválidos.
+        """
+        registros = self.cliente_api.buscar_dolares()
+        registros.extend(self.cliente_api.buscar_otras_monedas())
+        importadas: List[CotizacionImportada] = []
+        for registro in registros:
+            importada = self._registrar_desde_api(registro)
+            if importada is not None:
+                importadas.append(importada)
+        if not importadas:
+            raise ValueError("La API no devolvió cotizaciones válidas.")
+        return importadas
+
+    def _registrar_desde_api(
+            self, registro: Dict[str, Any]) -> Optional[CotizacionImportada]:
+        """Convierte un registro de la API en una cotización persistida."""
+        venta = registro.get("venta")
+        if venta is None:
+            return None  # sin precio de venta no hay cotización utilizable
+        compra = registro.get("compra")
+        if compra is None or float(compra) > float(venta):
+            compra = venta
+        moneda = self._moneda_desde_api(registro)
+        tipo = self._tipo_desde_api(registro, moneda)
+        fecha = self._fecha_desde_api(registro.get("fechaActualizacion"))
+        cotizacion = CotizacionDolar(tipo.id or 0, fecha, float(compra),
+                                     float(venta))
+        existente = self._repositorio.leer_por_tipo_y_fecha(
+            cotizacion.tipo_id, fecha)
+        if existente is None:
+            self.crear(cotizacion)
+        else:
+            self.actualizar(cotizacion)
+        return CotizacionImportada(moneda, tipo, cotizacion,
+                                   nueva=existente is None)
+
+    def _moneda_desde_api(self, registro: Dict[str, Any]) -> Moneda:
+        codigo = str(registro.get("moneda") or CODIGO_DOLAR).upper()
+        moneda = self._repo_monedas.leer_por_codigo(codigo)
+        if moneda is None:
+            nombre = str(registro.get("nombre") or codigo)
+            moneda = self._repo_monedas.crear(Moneda(codigo, nombre, ""))
+        return moneda
+
+    def _tipo_desde_api(self, registro: Dict[str, Any],
+                        moneda: Moneda) -> TipoCotizacion:
+        casa = str(registro.get("casa") or "").strip().lower()
+        if moneda.codigo == CODIGO_DOLAR:
+            nombre = NOMBRES_CASAS_API.get(
+                casa, str(registro.get("nombre") or casa or "API"))
+        else:
+            nombre = casa.capitalize() or "Oficial"
+        tipo = self._repo_tipos.leer_por_nombre(nombre, moneda.id)
+        if tipo is None:
+            descripcion = f"{registro.get('nombre', nombre)} (importado " \
+                          f"desde la API, casa '{casa}')"
+            tipo = self._repo_tipos.crear(
+                TipoCotizacion(nombre, descripcion, moneda.id or 0))
+        return tipo
+
+    @staticmethod
+    def _fecha_desde_api(valor: Optional[str]) -> datetime.date:
+        """Convierte ``2026-10-08T18:00:00.000Z`` en una fecha local."""
+        if not valor:
+            return datetime.date.today()
+        texto = str(valor).replace("Z", "+00:00")
+        try:
+            instante = datetime.datetime.fromisoformat(texto)
+        except ValueError:
+            return datetime.date.today()
+        if instante.tzinfo is not None:
+            instante = instante.astimezone()
+        fecha = instante.date()
+        return min(fecha, datetime.date.today())
+
 
 # ---------------------------------------------------------------------------
-# Reportes: valuación del catálogo según la cotización del dólar
+# Reportes: valuación del catálogo según la cotización elegida
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -405,31 +626,62 @@ class LibroCotizado:
     valor_usd: float
 
 
+@dataclass
+class PrecioBimonetario:
+    """Precio de un libro en pesos y en otra moneda seleccionada."""
+
+    libro: Libro
+    precio: Precio
+    moneda_lista: Moneda
+    valor_ars: float
+    moneda: Moneda
+    tipo: TipoCotizacion
+    cotizacion: CotizacionDolar
+    valor_moneda: float
+
+
+@dataclass
+class ColumnaMoneda:
+    """Una moneda/tipo con cotización vigente, usada en la exportación."""
+
+    moneda: Moneda
+    tipo: TipoCotizacion
+    cotizacion: CotizacionDolar
+
+    @property
+    def encabezado(self) -> str:
+        return f"{self.moneda.codigo}_{self.tipo.nombre}".replace(" ", "_")
+
+
 class ServicioCotizador:
-    """Convierte los precios de los libros entre pesos y dólares."""
+    """Convierte los precios de los libros entre pesos y otras monedas."""
 
     def __init__(self, libros: ServicioLibro, precios: ServicioPrecio,
                  monedas: ServicioMoneda, stock: ServicioStock,
+                 tipos: ServicioTipoCotizacion,
                  cotizaciones: ServicioCotizacionDolar) -> None:
         self._libros = libros
         self._precios = precios
         self._monedas = monedas
         self._stock = stock
+        self._tipos = tipos
         self._cotizaciones = cotizaciones
+
+    # -- reportes del Sprint 1 --------------------------------------------
 
     def cotizar_libro(self, libro_id: int, tipo_id: int) -> LibroCotizado:
         """Valúa un libro en ARS y USD usando la última cotización del tipo.
 
         Se toma el precio en USD si existe; en caso contrario el precio en
-        ARS. Cualquier otra moneda no puede cotizarse en este sprint.
+        ARS. Cualquier otra moneda de lista no puede cotizarse.
         """
         libro = self._libros.obtener(libro_id)
-        cotizacion = self._cotizaciones.obtener_ultima(tipo_id)
+        cotizacion = self._cotizacion_dolar(tipo_id)
         return self._cotizar(libro, cotizacion)
 
     def catalogo_valuado(self, tipo_id: int) -> List[LibroCotizado]:
         """Cotiza todos los libros que tengan precio en ARS o USD."""
-        cotizacion = self._cotizaciones.obtener_ultima(tipo_id)
+        cotizacion = self._cotizacion_dolar(tipo_id)
         resultado: List[LibroCotizado] = []
         for libro in self._libros.listar():
             try:
@@ -450,6 +702,113 @@ class ServicioCotizador:
             total_ars += cotizado.valor_ars * cantidad
             total_usd += cotizado.valor_usd * cantidad
         return round(total_ars, 2), round(total_usd, 2)
+
+    # -- reportes del Sprint 2 (Ejercicio 08) -----------------------------
+
+    def monedas_con_cotizacion(self) -> List[ColumnaMoneda]:
+        """Monedas (distintas del peso) que tienen al menos una cotización.
+
+        Devuelve una entrada por cada tipo de cotización con datos, con
+        la cotización más reciente de ese tipo.
+        """
+        columnas: List[ColumnaMoneda] = []
+        for moneda in self._monedas.listar():
+            if moneda.codigo == CODIGO_PESO:
+                continue
+            for tipo in self._tipos.listar_por_moneda(moneda.id or 0):
+                try:
+                    cotizacion = self._cotizaciones.obtener_ultima(
+                        tipo.id or 0)
+                except ValueError:
+                    continue
+                columnas.append(ColumnaMoneda(moneda, tipo, cotizacion))
+        return columnas
+
+    def lista_precios_bimonetaria(self, tipo_dolar_id: int,
+                                  tipo_moneda_id: int
+                                  ) -> List[PrecioBimonetario]:
+        """Lista de precios en pesos y en la moneda del tipo seleccionado.
+
+        Args:
+            tipo_dolar_id (int): Tipo de dólar con el que se pasan a pesos
+                los libros cuyo precio de lista está en USD.
+            tipo_moneda_id (int): Tipo de cotización (de cualquier moneda)
+                en el que se expresa la segunda columna.
+
+        Returns:
+            List[PrecioBimonetario]: Un registro por libro cotizable.
+        """
+        tipo = self._tipos.obtener(tipo_moneda_id)
+        moneda = self._monedas.obtener(tipo.moneda_id)
+        cotizacion = self._cotizaciones.obtener_ultima(tipo_moneda_id)
+        resultado: List[PrecioBimonetario] = []
+        for cotizado in self.catalogo_valuado(tipo_dolar_id):
+            resultado.append(PrecioBimonetario(
+                libro=cotizado.libro, precio=cotizado.precio,
+                moneda_lista=cotizado.moneda, valor_ars=cotizado.valor_ars,
+                moneda=moneda, tipo=tipo, cotizacion=cotizacion,
+                valor_moneda=round(cotizado.valor_ars / cotizacion.venta, 2)))
+        return resultado
+
+    def exportar_precios_csv(self, ruta: Path,
+                             tipo_dolar_id: int) -> Tuple[Path, int, int]:
+        """Exporta los precios en pesos y en todas las monedas con cotización.
+
+        Args:
+            ruta (Path): Archivo CSV de destino (se crea la carpeta).
+            tipo_dolar_id (int): Tipo de dólar para pasar a pesos los
+                libros con precio de lista en USD.
+
+        Returns:
+            Tuple[Path, int, int]: Ruta escrita, cantidad de libros y
+                cantidad de columnas de moneda exportadas.
+        """
+        columnas = self.monedas_con_cotizacion()
+        if not columnas:
+            raise ValueError(
+                "No hay cotizaciones registradas: obtenga las cotizaciones "
+                "por API o cargue alguna manualmente.")
+        catalogo = self.catalogo_valuado(tipo_dolar_id)
+        encabezados = ["id", "isbn", "titulo", "autor", "moneda_lista",
+                       "precio_lista", CODIGO_PESO]
+        encabezados.extend(columna.encabezado for columna in columnas)
+        ruta = Path(ruta)
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        with ruta.open("w", newline="", encoding="utf-8") as archivo:
+            escritor = csv.writer(archivo, lineterminator="\n")
+            escritor.writerow(encabezados)
+            escritor.writerow(self._fila_cotizaciones(columnas))
+            for cotizado in catalogo:
+                fila: List[object] = [
+                    cotizado.libro.id, cotizado.libro.isbn,
+                    cotizado.libro.titulo, cotizado.libro.autor,
+                    cotizado.moneda.codigo, f"{cotizado.precio.valor:.2f}",
+                    f"{cotizado.valor_ars:.2f}"]
+                fila.extend(
+                    f"{cotizado.valor_ars / columna.cotizacion.venta:.2f}"
+                    for columna in columnas)
+                escritor.writerow(fila)
+        return ruta, len(catalogo), len(columnas)
+
+    @staticmethod
+    def _fila_cotizaciones(columnas: Sequence[ColumnaMoneda]) -> List[object]:
+        """Fila informativa con la cotización (venta) usada en cada columna."""
+        fila: List[object] = ["", "", "Cotización de venta utilizada", "",
+                              "", "", "1.00"]
+        fila.extend(f"{columna.cotizacion.venta:.2f}" for columna in columnas)
+        return fila
+
+    # -- internos ---------------------------------------------------------
+
+    def _cotizacion_dolar(self, tipo_id: int) -> CotizacionDolar:
+        """Última cotización de un tipo que debe pertenecer al dólar."""
+        tipo = self._tipos.obtener(tipo_id)
+        moneda = self._monedas.obtener(tipo.moneda_id)
+        if moneda.codigo != CODIGO_DOLAR:
+            raise ValueError(
+                f"El tipo '{tipo.nombre}' corresponde a {moneda.codigo}; "
+                "para valuar en pesos se necesita un tipo de dólar.")
+        return self._cotizaciones.obtener_ultima(tipo_id)
 
     def _cotizar(self, libro: Libro,
                  cotizacion: CotizacionDolar) -> LibroCotizado:
@@ -504,20 +863,22 @@ class Servicios:
         libros = ServicioLibro(repos.libros, repos.generos,
                                repos.editoriales, repos.precios, repos.stock)
         precios = ServicioPrecio(repos.precios, repos.libros, repos.monedas)
-        monedas = ServicioMoneda(repos.monedas, repos.precios)
+        monedas = ServicioMoneda(repos.monedas, repos.precios,
+                                 repos.tipos_cotizacion)
+        tipos = ServicioTipoCotizacion(repos.tipos_cotizacion,
+                                       repos.cotizaciones, repos.monedas)
         stock = ServicioStock(repos.stock, repos.libros)
-        cotizaciones = ServicioCotizacionDolar(repos.cotizaciones,
-                                               repos.tipos_cotizacion)
+        cotizaciones = ServicioCotizacionDolar(
+            repos.cotizaciones, repos.tipos_cotizacion, repos.monedas)
         return cls(
             generos=ServicioGenero(repos.generos, repos.libros),
             editoriales=ServicioEditorial(repos.editoriales, repos.libros),
             monedas=monedas,
-            tipos_cotizacion=ServicioTipoCotizacion(repos.tipos_cotizacion,
-                                                    repos.cotizaciones),
+            tipos_cotizacion=tipos,
             libros=libros,
             precios=precios,
             stock=stock,
             cotizaciones=cotizaciones,
             cotizador=ServicioCotizador(libros, precios, monedas, stock,
-                                        cotizaciones),
+                                        tipos, cotizaciones),
         )
