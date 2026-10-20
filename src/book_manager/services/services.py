@@ -19,7 +19,8 @@ Sprint 3:
 
 - ``ServicioScraping`` ejecuta el scraper de Cúspide (Ejercicio 03).
 - ``ServicioComparadorPrecios`` compara el precio interno con el precio
-  web y genera el archivo CSV de alertas (Ejercicio 04).
+  web y genera el archivo CSV de alertas (Ejercicio 04) y el reporte
+  Excel de precios (Ejercicio 05).
 """
 from __future__ import annotations
 
@@ -35,6 +36,10 @@ from pathlib import Path
 from typing import Any, Dict, Generic, List, Optional, Sequence, Tuple, TypeVar
 
 import requests
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.worksheet import Worksheet
 
 from book_manager.database.connection import variable_entorno
 from book_manager.entities.entities import (
@@ -1087,7 +1092,7 @@ class ServicioComparadorPrecios:
                 continue  # libro borrado o sin precio interno cotizable
             comparaciones.append(ComparacionPrecio(libro, interno,
                                                    precio_web))
-        return comparaciones
+        return sorted(comparaciones, key=lambda c: c.libro.id or 0)
 
     def generar_alertas_csv(self, umbral_porcentual: float,
                             tipo_dolar_id: Optional[int] = None,
@@ -1132,6 +1137,113 @@ class ServicioComparadorPrecios:
                     alerta.precio_web.titulo, alerta.precio_web.url])
         return ResultadoAlertas(archivo, umbral_porcentual, comparaciones,
                                 alertas)
+
+    # -- Ejercicio 05: reporte Excel ------------------------------------------
+
+    def generar_reporte_excel(self, tipo_dolar_id: Optional[int] = None,
+                              fecha: Optional[datetime.datetime] = None,
+                              carpeta: Path = CARPETA_REPORTES
+                              ) -> Tuple[Path, int]:
+        """Genera el reporte Excel de precios internos contra la web.
+
+        La hoja "Comparación" tiene, por libro: Libro, Precio interno,
+        Precio web, Diferencia y Fecha de extracción (más el porcentaje,
+        el ISBN y el enlace al producto). La hoja "Resultados web" lista
+        los 10 resultados de cada búsqueda con sus formas de pago, imagen
+        y descripción.
+
+        Returns:
+            Tuple[Path, int]: Ruta del archivo y cantidad de libros.
+        """
+        momento = fecha or self._scraping.ultima_fecha_extraccion()
+        comparaciones = self.comparar(tipo_dolar_id, momento)
+        if not comparaciones:
+            raise ValueError("No hay libros encontrados en la web para "
+                             "comparar: ejecute el scraping primero.")
+        excel = Workbook()
+        hoja = excel.active
+        hoja.title = "Comparación"
+        self._hoja_comparacion(hoja, comparaciones)
+        self._hoja_resultados(excel.create_sheet("Resultados web"),
+                              self._scraping.resultados(momento))
+        carpeta = Path(carpeta)
+        carpeta.mkdir(parents=True, exist_ok=True)
+        archivo = carpeta / \
+            f"reporte_precios_{momento.strftime('%Y%m%d_%H%M%S')}.xlsx"
+        excel.save(archivo)
+        return archivo, len(comparaciones)
+
+    FORMATO_PESOS = '"$" #,##0.00'
+    FORMATO_FECHA_HORA = "dd/mm/yyyy hh:mm"
+
+    @staticmethod
+    def _encabezado(hoja: Worksheet, titulos: Sequence[str],
+                    anchos: Sequence[int]) -> None:
+        hoja.append(list(titulos))
+        relleno = PatternFill("solid", fgColor="1F3864")
+        for columna, ancho in enumerate(anchos, start=1):
+            celda = hoja.cell(row=1, column=columna)
+            celda.font = Font(bold=True, color="FFFFFF")
+            celda.fill = relleno
+            celda.alignment = Alignment(horizontal="center",
+                                        vertical="center", wrap_text=True)
+            hoja.column_dimensions[get_column_letter(columna)].width = ancho
+        hoja.freeze_panes = "A2"
+
+    def _hoja_comparacion(self, hoja: Worksheet,
+                          comparaciones: Sequence[ComparacionPrecio]) -> None:
+        self._encabezado(
+            hoja, ("Libro", "Precio interno", "Precio web", "Diferencia",
+                   "Fecha de extracción", "Diferencia %", "ISBN",
+                   "Título en la web", "URL"),
+            (38, 16, 16, 16, 20, 14, 16, 45, 60))
+        for c in comparaciones:
+            hoja.append([c.libro.titulo, c.precio_interno, c.precio_web.precio,
+                         c.diferencia, c.fecha_extraccion,
+                         c.diferencia_porcentual / 100, c.libro.isbn,
+                         c.precio_web.titulo, c.precio_web.url])
+            fila = hoja.max_row
+            for columna in (2, 3, 4):
+                hoja.cell(row=fila, column=columna).number_format = \
+                    self.FORMATO_PESOS
+            hoja.cell(row=fila, column=5).number_format = \
+                self.FORMATO_FECHA_HORA
+            hoja.cell(row=fila, column=6).number_format = "0.00%"
+            color = "C00000" if c.diferencia < 0 else "00804A"
+            for columna in (4, 6):
+                hoja.cell(row=fila, column=columna).font = Font(color=color)
+        hoja.auto_filter.ref = hoja.dimensions
+
+    def _hoja_resultados(self, hoja: Worksheet,
+                         resultados: Sequence[PrecioWeb]) -> None:
+        self._encabezado(
+            hoja, ("Libro ID", "Libro", "Posición", "Título en la web",
+                   "Precio web", "Precio U$s", "Coincidencia",
+                   "Seleccionado", "Formas de pago y precio", "URL imagen",
+                   "Descripción", "URL", "Fecha de extracción"),
+            (9, 30, 9, 40, 14, 11, 12, 12, 60, 45, 70, 50, 20))
+        nombres: Dict[int, str] = {}
+        for r in resultados:
+            if r.libro_id not in nombres:
+                try:
+                    nombres[r.libro_id] = self._libros.obtener(
+                        r.libro_id).titulo
+                except ValueError:
+                    nombres[r.libro_id] = f"? ({r.libro_id})"
+            hoja.append([r.libro_id, nombres[r.libro_id], r.posicion,
+                         r.titulo, r.precio, r.precio_usd,
+                         r.coincidencia, "Sí" if r.seleccionado else "",
+                         "\n".join(r.formas_pago), r.url_imagen,
+                         r.descripcion, r.url, r.fecha_extraccion])
+            fila = hoja.max_row
+            hoja.cell(row=fila, column=5).number_format = self.FORMATO_PESOS
+            hoja.cell(row=fila, column=6).number_format = '"U$s" #,##0.00'
+            hoja.cell(row=fila, column=13).number_format = \
+                self.FORMATO_FECHA_HORA
+            for columna in (9, 11):
+                hoja.cell(row=fila, column=columna).alignment = Alignment(
+                    wrap_text=True, vertical="top")
+        hoja.auto_filter.ref = hoja.dimensions
 
 
 # ---------------------------------------------------------------------------

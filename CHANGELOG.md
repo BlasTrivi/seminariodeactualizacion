@@ -5,6 +5,16 @@ día de trabajo (commit `"Día X: ..."`).
 
 # Sprint 3
 
+## [Ejercicio 05]
+
+- `ServicioComparadorPrecios.generar_reporte_excel` crea
+  `reportes/reporte_precios_<fecha>.xlsx` con `openpyxl`:
+  - Hoja **Comparación**: Libro, Precio interno, Precio web, Diferencia y
+    Fecha de extracción (más diferencia %, ISBN, título y URL en la web),
+    con formato de moneda, fecha, filtros y colores según la diferencia.
+  - Hoja **Resultados web**: los 10 resultados de cada búsqueda con
+    formas de pago y precio, URL de la imagen y descripción.
+
 ## [Ejercicio 04]
 
 - `ServicioComparadorPrecios`: compara el precio interno (en pesos; los
