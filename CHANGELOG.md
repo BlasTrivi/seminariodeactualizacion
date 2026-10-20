@@ -5,6 +5,19 @@ día de trabajo (commit `"Día X: ..."`).
 
 # Sprint 3
 
+## [Ejercicio 07]
+
+- Se agregan al menú principal de `ui/console.py` las opciones
+  **13. Ejecutar scraping** (pide antes la diferencia de precios en %,
+  ejecuta el spider, muestra la comparación y genera el CSV de alertas),
+  **14. Generar reporte** (reporte Excel) y **15. Ver historial de
+  auditoría** (con cantidad y filtro por acción).
+- En Reportes: reporte Excel y resultados del último scraping.
+- `ServicioComparadorPrecios.scraping_con_alertas(umbral)`: ejecuta el
+  scraper y genera el CSV de alertas de esa misma ejecución.
+- README con el menú del Sprint 3 y la ejecución del scraper.
+- Se completa el notebook de entrega `03_Book_Manager_Grupo_15.ipynb`.
+
 ## [Ejercicio 06]
 
 - Decorador `auditar(accion)` en `services/services.py`: registra en la

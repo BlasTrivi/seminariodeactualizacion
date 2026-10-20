@@ -296,11 +296,11 @@ class CargadorSQL:
         Raises:
             FileNotFoundError: Si no hay scripts de datos en la carpeta.
         """
+        self._conexion.crear_tablas()
         scripts = self.scripts()
         if not scripts:
             raise FileNotFoundError(
                 f"No hay scripts .sql de datos en {self._carpeta_sqls}.")
-        self._conexion.crear_tablas()
         if vaciar:
             Repositorios.desde_conexion(self._conexion).vaciar()
         resultados: List[ResultadoCargaSQL] = []

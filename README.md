@@ -90,3 +90,34 @@ Desde un notebook (Google Colab):
 from book_manager.main import main
 main(import_default_data=False)   # True regenera los CSV y vuelve a migrar
 ```
+
+En la primera ejecución (base vacía) el sistema crea las tablas y las carga
+desde los scripts de `migrations/sql` (si no existieran, migra los CSV).
+
+## Menú del sistema
+
+1-8. ABM (Listar / Alta / Modificar / Baja) de Libros, Géneros, Editoriales,
+     Monedas, Tipos de cotización, Precios, Stock y Cotizaciones.
+9. Reportes (catálogo valuado, cotizar un libro, stock bajo mínimo, valor
+   del inventario, histórico, lista bimonetaria, exportación, reporte
+   Excel y resultados del último scraping).
+10. Obtener las cotizaciones por API.
+11. Lista de precios bimonetaria.
+12. Exportar precios a CSV (todas las monedas).
+13. **Ejecutar scraping**: pide la diferencia de precios (%) que dispara
+    una alerta, busca en Cúspide los libros del catálogo y genera
+    `reportes/alertas/alertas_<fecha>.csv`.
+14. **Generar reporte**: crea `reportes/reporte_precios_<fecha>.xlsx` con
+    libro, precio interno, precio web, diferencia y fecha de extracción.
+15. **Ver historial de auditoría**: últimas operaciones registradas
+    (acción, fecha y detalles), con filtro por acción.
+
+## Scraper
+
+El scraper también puede ejecutarse solo, con Scrapy:
+
+```bash
+cd src/book_manager/scraper
+PYTHONPATH=../.. scrapy crawl cuspide            # todo el catálogo
+PYTHONPATH=../.. scrapy crawl cuspide -a libros=1,2
+```

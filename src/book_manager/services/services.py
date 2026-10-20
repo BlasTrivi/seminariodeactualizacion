@@ -138,7 +138,9 @@ def describir(valor: Any) -> str:
         datos = {k: (v if len(v) <= 60 else v[:57] + "...")
                  for k, v in valor.a_dict().items() if v != ""}
         return f"{type(valor).__name__}({datos})"
-    if isinstance(valor, (list, tuple)):
+    if isinstance(valor, tuple):
+        return f"({', '.join(describir(v) for v in valor)})"
+    if isinstance(valor, list):
         return f"{len(valor)} registro(s)"
     if isinstance(valor, Path):
         return str(valor)
@@ -1187,6 +1189,10 @@ class ResultadoAlertas:
     comparaciones: List[ComparacionPrecio]
     alertas: List[ComparacionPrecio] = field(default_factory=list)
 
+    def __str__(self) -> str:
+        return (f"{len(self.alertas)} alerta(s) de {len(self.comparaciones)}"
+                f" libro(s) comparados -> {self.archivo}")
+
 
 class ServicioComparadorPrecios:
     """Compara nuestros precios con los de la competencia."""
@@ -1299,6 +1305,23 @@ class ServicioComparadorPrecios:
                     alerta.precio_web.titulo, alerta.precio_web.url])
         return ResultadoAlertas(archivo, umbral_porcentual, comparaciones,
                                 alertas)
+
+    @auditar("SCRAPING CON ALERTAS")
+    def scraping_con_alertas(self, umbral_porcentual: float,
+                             libros_ids: Optional[Sequence[int]] = None,
+                             tipo_dolar_id: Optional[int] = None
+                             ) -> Tuple[ResultadoScraping, ResultadoAlertas]:
+        """Ejecuta el scraper y genera el CSV de alertas de esa ejecución.
+
+        El umbral se pide antes de ejecutar el scraper para que cada
+        ejecución deje su propio archivo de alertas.
+        """
+        if umbral_porcentual < 0:
+            raise ValueError("La diferencia de precios no puede ser negativa.")
+        resultado = self._scraping.ejecutar_scraping(libros_ids)
+        alertas = self.generar_alertas_csv(umbral_porcentual, tipo_dolar_id,
+                                           resultado.fecha_extraccion)
+        return resultado, alertas
 
     # -- Ejercicio 05: reporte Excel ------------------------------------------
 

@@ -9,6 +9,10 @@ Sprint 2 (Ejercicio 08): se agregan al menú principal las opciones para
 obtener las cotizaciones por API, ver la lista de precios bimonetaria
 (pesos y otra moneda seleccionada) y exportar los precios a CSV para
 todas las monedas con cotización.
+
+Sprint 3 (Ejercicio 07): se agregan las opciones para ejecutar el scraping
+de precios en Cúspide (pidiendo antes la diferencia de precios que genera
+alertas), generar el reporte Excel y ver el historial de auditoría.
 """
 from __future__ import annotations
 
@@ -22,7 +26,7 @@ from book_manager.entities.entities import (
     TipoCotizacion, fecha_desde,
 )
 from book_manager.services.services import (
-    CODIGO_DOLAR, ColumnaMoneda, Servicios,
+    CODIGO_DOLAR, ColumnaMoneda, ComparacionPrecio, Servicios,
 )
 
 Accion = Callable[[], None]
@@ -31,6 +35,8 @@ Opciones = Dict[str, Tuple[str, Accion]]
 ANCHO = 72
 CARPETA_EXPORTACION = RAIZ_PROYECTO / "exports"
 ARCHIVO_EXPORTACION = "precios_todas_las_monedas.csv"
+UMBRAL_ALERTA_POR_DEFECTO = 10.0
+LARGO_DETALLE_AUDITORIA = 70
 
 
 def formato_importe(valor: float) -> str:
@@ -67,8 +73,11 @@ class ConsolaUI:
                    self._lista_precios_bimonetaria),
             "12": ("Exportar precios a CSV (todas las monedas)",
                    self._exportar_precios_csv),
+            "13": ("Ejecutar scraping", self._ejecutar_scraping),
+            "14": ("Generar reporte", self._generar_reporte),
+            "15": ("Ver historial de auditoría", self._ver_auditoria),
         }
-        self._titulo("BOOK MANAGER - Sprint 2")
+        self._titulo("BOOK MANAGER - Sprint 3")
         self._bucle_menu("Menú principal", opciones, "Salir")
         print("Hasta luego.")
 
@@ -700,6 +709,92 @@ class ConsolaUI:
               f"columna(s) de moneda/tipo a:\n  {ruta}")
 
     # ------------------------------------------------------------------
+    # Sprint 3 - Ejercicio 07: scraping, reporte y auditoría
+    # ------------------------------------------------------------------
+
+    def _tabla_comparaciones(self, comparaciones: Sequence[ComparacionPrecio],
+                             umbral: Optional[float] = None) -> None:
+        filas = []
+        for c in comparaciones:
+            fila: List[object] = [
+                c.libro.id, c.libro.titulo, formato_importe(c.precio_interno),
+                formato_importe(c.precio_web.precio),
+                formato_importe(c.diferencia),
+                f"{c.diferencia_porcentual:+.2f}%",
+                c.fecha_extraccion.strftime("%Y-%m-%d %H:%M")]
+            if umbral is not None:
+                fila.append(c.tipo_alerta.upper() if c.supera(umbral)
+                            else "")
+            filas.append(fila)
+        encabezados = ["ID", "Libro", "Precio interno", "Precio web",
+                       "Diferencia", "Dif. %", "Extracción"]
+        if umbral is not None:
+            encabezados.append("Alerta")
+        self._imprimir_tabla(encabezados, filas)
+
+    def _pedir_umbral(self) -> float:
+        """Diferencia de precios (%) que dispara una alerta."""
+        while True:
+            umbral = self._pedir_float(
+                "Diferencia de precios (%) a partir de la cual se genera "
+                "una alerta", actual=UMBRAL_ALERTA_POR_DEFECTO)
+            if umbral >= 0:
+                return umbral
+            print("La diferencia no puede ser negativa.")
+
+    def _ejecutar_scraping(self) -> None:
+        """Pide el umbral, ejecuta el scraper y genera el CSV de alertas."""
+        umbral = self._pedir_umbral()
+        libros = self._s.libros.listar()
+        print(f"\nBuscando {len(libros)} libro(s) del catálogo en Cúspide "
+              "(10 primeros resultados por título). Puede demorar unos "
+              "minutos...")
+        resultado, alertas = self._s.comparador.scraping_con_alertas(umbral)
+        print(resultado)
+        if resultado.libros_sin_resultados:
+            titulos = ", ".join(self._nombre_libro(i)
+                                for i in resultado.libros_sin_resultados)
+            print(f"Sin resultados en el sitio: {titulos}")
+        print(f"\nComparación de precios (alerta si la diferencia es de "
+              f"{umbral:.2f}% o más):")
+        self._tabla_comparaciones(alertas.comparaciones, umbral)
+        print(f"\n{len(alertas.alertas)} alerta(s) guardadas en:\n"
+              f"  {alertas.archivo}")
+
+    def _generar_reporte(self) -> None:
+        """Genera el reporte Excel de la última ejecución del scraper."""
+        archivo, cantidad = self._s.comparador.generar_reporte_excel()
+        self._tabla_comparaciones(self._s.comparador.comparar())
+        print(f"\nReporte Excel con {cantidad} libro(s) generado en:\n"
+              f"  {archivo}")
+
+    def _ver_auditoria(self) -> None:
+        """Muestra las últimas operaciones registradas en la auditoría."""
+        cantidad = self._pedir_int("Cantidad de registros a mostrar",
+                                   actual=30)
+        filtro = self._pedir_texto(
+            "Filtrar por acción (ej.: ALTA, Libro, SCRAPING; Enter = todas)",
+            obligatorio=False)
+        registros = self._s.auditoria.historial(cantidad, filtro or None)
+        filas = []
+        for registro in registros:
+            detalles = registro.detalles
+            if len(detalles) > LARGO_DETALLE_AUDITORIA:
+                detalles = detalles[:LARGO_DETALLE_AUDITORIA - 3] + "..."
+            filas.append((registro.id, registro.fecha, registro.accion,
+                          detalles))
+        self._imprimir_tabla(("ID", "Fecha", "Acción", "Detalles"), filas)
+
+    def _resultados_scraping(self) -> None:
+        """Los 10 resultados de cada libro en la última ejecución."""
+        filas = [(r.libro_id, self._nombre_libro(r.libro_id), r.posicion,
+                  r.titulo[:40], formato_importe(r.precio), r.coincidencia,
+                  "*" if r.seleccionado else "")
+                 for r in self._s.scraping.resultados()]
+        self._imprimir_tabla(("Libro ID", "Libro", "Pos.", "Título web",
+                              "Precio", "Coinc.", "Elegido"), filas)
+
+    # ------------------------------------------------------------------
     # Reportes
     # ------------------------------------------------------------------
 
@@ -717,6 +812,10 @@ class ConsolaUI:
                   self._lista_precios_bimonetaria),
             "7": ("Exportar precios a CSV (todas las monedas)",
                   self._exportar_precios_csv),
+            "8": ("Reporte Excel de precios contra la web",
+                  self._generar_reporte),
+            "9": ("Resultados del último scraping",
+                  self._resultados_scraping),
         }
         self._bucle_menu("Reportes", opciones)
 
