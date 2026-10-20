@@ -5,6 +5,19 @@ día de trabajo (commit `"Día X: ..."`).
 
 # Sprint 3
 
+## [Ejercicio 04]
+
+- `ServicioComparadorPrecios`: compara el precio interno (en pesos; los
+  precios de lista en USD se convierten con el dólar Oficial o el tipo
+  elegido) con el precio web del resultado seleccionado de cada libro.
+- `ComparacionPrecio` calcula la diferencia en pesos y en porcentaje e
+  indica si el competidor es más barato o más caro.
+- `generar_alertas_csv(umbral_porcentual)`: el usuario ingresa la
+  diferencia (%) antes de cada ejecución del scraper y se genera
+  `reportes/alertas/alertas_<fecha>.csv` con los libros que la superan
+  (UTF-8 con BOM para abrirlo directo en Excel).
+- `reportes/.gitignore` para no versionar los archivos generados.
+
 ## [Ejercicio 03]
 
 - Proyecto Scrapy en `scraper/` (`scrapy.cfg`, `settings.py`, `items.py`,

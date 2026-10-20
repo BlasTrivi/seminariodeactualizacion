@@ -18,6 +18,8 @@ Sprint 2:
 Sprint 3:
 
 - ``ServicioScraping`` ejecuta el scraper de Cúspide (Ejercicio 03).
+- ``ServicioComparadorPrecios`` compara el precio interno con el precio
+  web y genera el archivo CSV de alertas (Ejercicio 04).
 """
 from __future__ import annotations
 
@@ -974,6 +976,165 @@ class ServicioScraping(ServicioBase[PrecioWeb]):
 
 
 # ---------------------------------------------------------------------------
+# Sprint 3 - Ejercicio 04: comparación de precios y alertas
+# ---------------------------------------------------------------------------
+
+ALERTA_COMPETIDOR_MAS_BARATO = "Competidor más barato"
+ALERTA_COMPETIDOR_MAS_CARO = "Competidor más caro"
+
+
+@dataclass
+class ComparacionPrecio:
+    """Precio interno de un libro contra el precio publicado en la web."""
+
+    libro: Libro
+    precio_interno: float
+    precio_web: PrecioWeb
+
+    @property
+    def diferencia(self) -> float:
+        """Precio web menos precio interno (negativo: la web es más barata)."""
+        return round(self.precio_web.precio - self.precio_interno, 2)
+
+    @property
+    def diferencia_porcentual(self) -> float:
+        """Diferencia expresada como porcentaje del precio interno."""
+        return round(self.diferencia / self.precio_interno * 100, 2)
+
+    @property
+    def fecha_extraccion(self) -> datetime.datetime:
+        return self.precio_web.fecha_extraccion
+
+    @property
+    def tipo_alerta(self) -> str:
+        return (ALERTA_COMPETIDOR_MAS_BARATO if self.diferencia < 0
+                else ALERTA_COMPETIDOR_MAS_CARO)
+
+    def supera(self, umbral_porcentual: float) -> bool:
+        """True si la diferencia (en valor absoluto) alcanza el umbral."""
+        return abs(self.diferencia_porcentual) >= umbral_porcentual
+
+
+@dataclass
+class ResultadoAlertas:
+    """Archivo de alertas generado y comparaciones que lo originaron."""
+
+    archivo: Path
+    umbral_porcentual: float
+    comparaciones: List[ComparacionPrecio]
+    alertas: List[ComparacionPrecio] = field(default_factory=list)
+
+
+class ServicioComparadorPrecios:
+    """Compara nuestros precios con los de la competencia."""
+
+    ENCABEZADOS_ALERTAS = (
+        "fecha_extraccion", "libro_id", "isbn", "libro", "precio_interno",
+        "precio_web", "diferencia", "diferencia_porcentual",
+        "umbral_porcentual", "alerta", "titulo_web", "url")
+
+    def __init__(self, libros: ServicioLibro, monedas: ServicioMoneda,
+                 tipos: ServicioTipoCotizacion, cotizador: ServicioCotizador,
+                 scraping: ServicioScraping,
+                 carpeta_alertas: Path = CARPETA_REPORTES / "alertas"
+                 ) -> None:
+        self._libros = libros
+        self._monedas = monedas
+        self._tipos = tipos
+        self._cotizador = cotizador
+        self._scraping = scraping
+        self._carpeta_alertas = Path(carpeta_alertas)
+
+    def tipo_dolar_por_defecto(self) -> int:
+        """Id del dólar Oficial (o del primer tipo de dólar disponible).
+
+        Se usa para pasar a pesos los libros cuyo precio de lista está en
+        dólares, ya que Cúspide publica sus precios en pesos.
+        """
+        dolar = self._monedas.obtener_por_codigo(CODIGO_DOLAR)
+        tipos = self._tipos.listar_por_moneda(dolar.id or 0)
+        if not tipos:
+            raise ValueError("No hay tipos de cotización del dólar cargados.")
+        for tipo in tipos:
+            if tipo.nombre.lower() == "oficial":
+                return tipo.id or 0
+        return tipos[0].id or 0
+
+    def precio_interno(self, libro_id: int,
+                       tipo_dolar_id: Optional[int] = None) -> float:
+        """Precio interno del libro expresado en pesos."""
+        tipo = tipo_dolar_id or self.tipo_dolar_por_defecto()
+        return self._cotizador.cotizar_libro(libro_id, tipo).valor_ars
+
+    def comparar(self, tipo_dolar_id: Optional[int] = None,
+                 fecha: Optional[datetime.datetime] = None
+                 ) -> List[ComparacionPrecio]:
+        """Compara cada libro encontrado en la web con su precio interno.
+
+        Args:
+            tipo_dolar_id (Optional[int]): Dólar para pasar a pesos los
+                precios de lista en USD (por defecto el Oficial).
+            fecha (Optional[datetime.datetime]): Ejecución del scraper a
+                comparar (por defecto la última).
+        """
+        tipo = tipo_dolar_id or self.tipo_dolar_por_defecto()
+        comparaciones: List[ComparacionPrecio] = []
+        for precio_web in self._scraping.seleccionados(fecha):
+            try:
+                libro = self._libros.obtener(precio_web.libro_id)
+                interno = self.precio_interno(precio_web.libro_id, tipo)
+            except ValueError:
+                continue  # libro borrado o sin precio interno cotizable
+            comparaciones.append(ComparacionPrecio(libro, interno,
+                                                   precio_web))
+        return comparaciones
+
+    def generar_alertas_csv(self, umbral_porcentual: float,
+                            tipo_dolar_id: Optional[int] = None,
+                            fecha: Optional[datetime.datetime] = None
+                            ) -> ResultadoAlertas:
+        """Genera el archivo CSV con las alertas de precios.
+
+        Hay alerta cuando la diferencia entre el precio web y el interno
+        (en valor absoluto y en porcentaje del precio interno) es mayor o
+        igual al umbral indicado por el usuario.
+
+        Args:
+            umbral_porcentual (float): Diferencia de precios (%) a partir
+                de la cual se genera una alerta.
+            tipo_dolar_id (Optional[int]): Dólar para los precios en USD.
+            fecha (Optional[datetime.datetime]): Ejecución del scraper.
+
+        Returns:
+            ResultadoAlertas: Ruta del CSV, comparaciones y alertas.
+        """
+        if umbral_porcentual < 0:
+            raise ValueError("La diferencia de precios no puede ser negativa.")
+        comparaciones = self.comparar(tipo_dolar_id, fecha)
+        alertas = [c for c in comparaciones if c.supera(umbral_porcentual)]
+        momento = fecha or self._scraping.ultima_fecha_extraccion()
+        self._carpeta_alertas.mkdir(parents=True, exist_ok=True)
+        archivo = self._carpeta_alertas / \
+            f"alertas_{momento.strftime('%Y%m%d_%H%M%S')}.csv"
+        with archivo.open("w", newline="", encoding="utf-8-sig") as salida:
+            escritor = csv.writer(salida, lineterminator="\n")
+            escritor.writerow(self.ENCABEZADOS_ALERTAS)
+            for alerta in sorted(alertas,
+                                 key=lambda c: -abs(c.diferencia_porcentual)):
+                escritor.writerow([
+                    alerta.fecha_extraccion.strftime("%Y-%m-%d %H:%M:%S"),
+                    alerta.libro.id, alerta.libro.isbn, alerta.libro.titulo,
+                    f"{alerta.precio_interno:.2f}",
+                    f"{alerta.precio_web.precio:.2f}",
+                    f"{alerta.diferencia:.2f}",
+                    f"{alerta.diferencia_porcentual:.2f}",
+                    f"{umbral_porcentual:.2f}", alerta.tipo_alerta,
+                    alerta.precio_web.titulo, alerta.precio_web.url])
+        return ResultadoAlertas(archivo, umbral_porcentual, comparaciones,
+                                alertas)
+
+
+# ---------------------------------------------------------------------------
 # Contenedor con todos los servicios del sistema
 # ---------------------------------------------------------------------------
 
@@ -991,6 +1152,7 @@ class Servicios:
     cotizaciones: ServicioCotizacionDolar
     cotizador: ServicioCotizador
     scraping: ServicioScraping
+    comparador: ServicioComparadorPrecios
 
     @classmethod
     def desde_repositorios(cls, repos: Repositorios) -> "Servicios":
@@ -1005,6 +1167,9 @@ class Servicios:
         stock = ServicioStock(repos.stock, repos.libros)
         cotizaciones = ServicioCotizacionDolar(
             repos.cotizaciones, repos.tipos_cotizacion, repos.monedas)
+        cotizador = ServicioCotizador(libros, precios, monedas, stock, tipos,
+                                      cotizaciones)
+        scraping = ServicioScraping(repos.precios_web, repos.libros)
         return cls(
             generos=ServicioGenero(repos.generos, repos.libros),
             editoriales=ServicioEditorial(repos.editoriales, repos.libros),
@@ -1014,7 +1179,8 @@ class Servicios:
             precios=precios,
             stock=stock,
             cotizaciones=cotizaciones,
-            cotizador=ServicioCotizador(libros, precios, monedas, stock,
-                                        tipos, cotizaciones),
-            scraping=ServicioScraping(repos.precios_web, repos.libros),
+            cotizador=cotizador,
+            scraping=scraping,
+            comparador=ServicioComparadorPrecios(libros, monedas, tipos,
+                                                 cotizador, scraping),
         )
