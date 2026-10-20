@@ -5,6 +5,16 @@ día de trabajo (commit `"Día X: ..."`).
 
 # Sprint 3
 
+## [Ejercicio 03 - Corrección]
+
+- `CuspideSpider` implementa `async def start()`: desde Scrapy 2.13 el
+  arranque no llama a `start_requests()` y el spider terminaba sin buscar
+  ningún libro en Colab (se mantiene `start_requests()` para versiones
+  anteriores).
+- Pipelines con `from_crawler` y argumento `spider` opcional: Scrapy
+  2.13+ deja de pasarlo (sin avisos de deprecación).
+- `ServicioScraping` informa un error si el scraper no buscó ningún libro.
+
 ## [Ejercicio 07]
 
 - Se agregan al menú principal de `ui/console.py` las opciones

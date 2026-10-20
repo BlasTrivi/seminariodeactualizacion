@@ -1129,6 +1129,10 @@ class ServicioScraping(ServicioBase[PrecioWeb]):
             detalle = (proceso.stderr or proceso.stdout).strip()[-1500:]
             raise ValueError(f"El scraper terminó con error:\n{detalle}")
         datos = json.loads(archivo_resumen.read_text(encoding="utf-8"))
+        if int(datos["libros_buscados"]) == 0:
+            detalle = (proceso.stderr or proceso.stdout).strip()[-1500:]
+            raise ValueError("El scraper no buscó ningún libro. Detalle:\n"
+                             f"{detalle}")
         return ResultadoScraping(
             fecha_extraccion=fecha,
             libros_buscados=int(datos["libros_buscados"]),

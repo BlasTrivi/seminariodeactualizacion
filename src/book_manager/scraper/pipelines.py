@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from itemadapter import ItemAdapter
 from scrapy import Spider
+from scrapy.crawler import Crawler
 from scrapy.exceptions import DropItem
 
 from book_manager.database.connection import ConexionDB
@@ -72,10 +73,33 @@ def puntaje_coincidencia(libro: Libro, titulo: str, autor: str = "",
     return min(puntaje, 95)
 
 
-class ValidacionPipeline:
+class PipelineBase:
+    """Guarda el crawler para acceder al spider y a la configuración.
+
+    Desde Scrapy 2.13 los métodos de los pipelines dejan de recibir el
+    argumento ``spider``; se lo obtiene del crawler, así el código
+    funciona con versiones nuevas y anteriores de Scrapy.
+    """
+
+    def __init__(self, crawler: Optional[Crawler] = None) -> None:
+        self._crawler = crawler
+
+    @classmethod
+    def from_crawler(cls, crawler: Crawler) -> "PipelineBase":
+        return cls(crawler)
+
+    def _spider(self, spider: Optional[Spider] = None) -> Any:
+        if spider is not None:
+            return spider
+        assert self._crawler is not None
+        return self._crawler.spider
+
+
+class ValidacionPipeline(PipelineBase):
     """Descarta los resultados incompletos o fuera de los 10 primeros."""
 
-    def process_item(self, item: Any, spider: Spider) -> Any:
+    def process_item(self, item: Any, spider: Optional[Spider] = None) -> Any:
+        spider = self._spider(spider)
         adaptador = ItemAdapter(item)
         for campo in ("libro_id", "titulo", "url", "precio"):
             if not adaptador.get(campo):
@@ -94,7 +118,7 @@ class ValidacionPipeline:
         return item
 
 
-class FormasPagoPipeline:
+class FormasPagoPipeline(PipelineBase):
     """Arma la lista "forma de pago — precio".
 
     El sitio publica un único precio online para todos los medios de
@@ -107,7 +131,7 @@ class FormasPagoPipeline:
         texto = f"{valor:,.2f}"
         return texto.replace(",", "X").replace(".", ",").replace("X", ".")
 
-    def process_item(self, item: Any, spider: Spider) -> Any:
+    def process_item(self, item: Any, spider: Optional[Spider] = None) -> Any:
         adaptador = ItemAdapter(item)
         precio = self._importe(adaptador["precio"])
         formas = [f"{forma} — $ {precio}"
@@ -123,10 +147,11 @@ class FormasPagoPipeline:
         return item
 
 
-class CoincidenciaPipeline:
+class CoincidenciaPipeline(PipelineBase):
     """Calcula el puntaje de coincidencia con el libro del catálogo."""
 
-    def process_item(self, item: Any, spider: Spider) -> Any:
+    def process_item(self, item: Any, spider: Optional[Spider] = None) -> Any:
+        spider = self._spider(spider)
         adaptador = ItemAdapter(item)
         libro = spider.catalogo.get(int(adaptador["libro_id"]))
         if libro is None:
@@ -137,21 +162,22 @@ class CoincidenciaPipeline:
         return item
 
 
-class BaseDatosPipeline:
+class BaseDatosPipeline(PipelineBase):
     """Guarda los resultados en la base y elige el mejor de cada libro."""
 
-    def __init__(self) -> None:
+    def __init__(self, crawler: Optional[Crawler] = None) -> None:
+        super().__init__(crawler)
         self._conexion: Optional[ConexionDB] = None
         self._repositorio: Optional[RepositorioPrecioWeb] = None
         self._guardados: Dict[int, List[PrecioWeb]] = defaultdict(list)
 
-    def open_spider(self, spider: Spider) -> None:
+    def open_spider(self, spider: Optional[Spider] = None) -> None:
         self._conexion = ConexionDB()
         self._conexion.crear_tablas()
         self._repositorio = Repositorios.desde_conexion(
             self._conexion).precios_web
 
-    def process_item(self, item: Any, spider: Spider) -> Any:
+    def process_item(self, item: Any, spider: Optional[Spider] = None) -> Any:
         adaptador = ItemAdapter(item)
         precio_web = PrecioWeb(
             libro_id=int(adaptador["libro_id"]),
@@ -170,7 +196,8 @@ class BaseDatosPipeline:
         self._guardados[precio_web.libro_id].append(precio_web)
         return item
 
-    def close_spider(self, spider: Spider) -> None:
+    def close_spider(self, spider: Optional[Spider] = None) -> None:
+        spider = self._spider(spider)
         assert self._repositorio is not None and self._conexion is not None
         seleccionados = 0
         for resultados in self._guardados.values():

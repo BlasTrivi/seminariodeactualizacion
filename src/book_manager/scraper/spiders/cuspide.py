@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import datetime
 import re
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
 from urllib.parse import quote_plus, urlparse
 
 import scrapy
@@ -137,12 +137,24 @@ class CuspideSpider(scrapy.Spider):
 
     # -- pedidos ------------------------------------------------------------
 
-    def start_requests(self) -> Iterator[scrapy.Request]:
+    def _pedidos_iniciales(self) -> List[scrapy.Request]:
+        """Una búsqueda por cada libro del catálogo."""
         self.catalogo = self.cargar_catalogo()
+        if not self.catalogo:
+            self.logger.error("No hay libros en la base para buscar.")
         self.logger.warning("Buscando %d libro(s) en %s", len(self.catalogo),
                             self.settings.get("CUSPIDE_URL"))
-        for libro in self.catalogo.values():
-            yield self._pedido_busqueda(libro, intento=0)
+        return [self._pedido_busqueda(libro, intento=0)
+                for libro in self.catalogo.values()]
+
+    async def start(self) -> AsyncIterator[scrapy.Request]:
+        """Pedidos iniciales (Scrapy 2.13 o superior)."""
+        for pedido in self._pedidos_iniciales():
+            yield pedido
+
+    def start_requests(self) -> Iterator[scrapy.Request]:
+        """Pedidos iniciales (Scrapy anterior a 2.13)."""
+        yield from self._pedidos_iniciales()
 
     def _pedido_busqueda(self, libro: Libro, intento: int) -> scrapy.Request:
         texto = variantes_busqueda(libro.titulo)[intento]
