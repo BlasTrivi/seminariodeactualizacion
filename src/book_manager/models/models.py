@@ -21,6 +21,7 @@ Esquema (normalizado):
     precios_web(id, libro_id -> libros, fecha_extraccion, posicion,
                 titulo, url, precio, precio_usd, url_imagen, formas_pago,
                 descripcion, isbn, coincidencia, seleccionado)   [Sprint 3]
+    auditoria(id, accion, fecha, detalles)                         [Sprint 3]
 """
 from __future__ import annotations
 
@@ -230,6 +231,20 @@ class PrecioWebModel(Base):
                                                default=False)
 
     libro: Mapped["LibroModel"] = relationship(back_populates="precios_web")
+
+
+class AuditoriaModel(Base):
+    """Tabla ``auditoria``: registro de cada operación del sistema."""
+
+    __tablename__ = "auditoria"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    accion: Mapped[str] = mapped_column(String(80), nullable=False,
+                                        index=True)
+    fecha: Mapped[datetime.datetime] = mapped_column(DateTime,
+                                                     nullable=False,
+                                                     index=True)
+    detalles: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
 
 #: Modelos en el orden que respeta las claves foráneas (para insertar).

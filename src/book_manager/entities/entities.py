@@ -12,7 +12,8 @@ de modo que un tipo de cotización pertenece a una moneda (el dólar tiene
 Oficial, Blue, MEP...; el euro o el real tienen su cotización Oficial).
 
 Sprint 3: ``PrecioWeb`` guarda cada resultado obtenido por el scraper en
-el sitio de la competencia (Cúspide).
+el sitio de la competencia (Cúspide) y ``Auditoria`` cada operación
+realizada en el sistema.
 """
 from __future__ import annotations
 
@@ -889,3 +890,62 @@ class PrecioWeb(EntidadBase):
 
     def __str__(self) -> str:
         return f"{self.titulo} ($ {self.precio:,.2f})"
+
+
+class Auditoria(EntidadBase):
+    """Registro de una operación realizada en el sistema (Sprint 3)."""
+
+    CAMPOS = ("id", "accion", "fecha", "detalles")
+
+    LARGO_MAXIMO_ACCION = 80
+
+    def __init__(self, accion: str,
+                 fecha: Union[datetime.datetime, str, None] = None,
+                 detalles: str = "", id: Optional[int] = None) -> None:
+        super().__init__(id)
+        self._accion = ""
+        self._fecha = datetime.datetime.now().replace(microsecond=0)
+        self._detalles = ""
+        self.accion = accion
+        self.fecha = fecha or datetime.datetime.now()
+        self.detalles = detalles
+
+    @property
+    def accion(self) -> str:
+        """Operación realizada, por ejemplo "ALTA Libro"."""
+        return self._accion
+
+    @accion.setter
+    def accion(self, valor: str) -> None:
+        self._accion = texto_obligatorio(valor, "accion")[
+            :self.LARGO_MAXIMO_ACCION]
+
+    @property
+    def fecha(self) -> datetime.datetime:
+        return self._fecha
+
+    @fecha.setter
+    def fecha(self, valor: Union[datetime.datetime, str]) -> None:
+        self._fecha = fecha_hora_desde(valor)
+
+    @property
+    def detalles(self) -> str:
+        return self._detalles
+
+    @detalles.setter
+    def detalles(self, valor: str) -> None:
+        self._detalles = texto_opcional(valor)
+
+    def a_dict(self) -> Dict[str, str]:
+        return {"id": self._id_como_texto(), "accion": self.accion,
+                "fecha": self.fecha.strftime(FORMATO_FECHA_HORA),
+                "detalles": self.detalles}
+
+    @classmethod
+    def desde_dict(cls, datos: Dict[str, str]) -> "Auditoria":
+        return cls(accion=datos["accion"], fecha=datos["fecha"],
+                   detalles=datos.get("detalles", ""),
+                   id=id_opcional(datos.get("id")))
+
+    def __str__(self) -> str:
+        return f"[{self.fecha}] {self.accion}"

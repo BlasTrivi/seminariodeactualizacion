@@ -21,11 +21,17 @@ Sprint 3:
 - ``ServicioComparadorPrecios`` compara el precio interno con el precio
   web y genera el archivo CSV de alertas (Ejercicio 04) y el reporte
   Excel de precios (Ejercicio 05).
+- El decorador ``auditar`` registra cada operación del sistema en la
+  tabla ``auditoria``; ``ServicioAuditoria`` permite consultarla
+  (Ejercicio 06).
 """
 from __future__ import annotations
 
+import contextvars
 import csv
+import dataclasses
 import datetime
+import functools
 import json
 import os
 import subprocess
@@ -33,7 +39,10 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Generic, List, Optional, Sequence, Tuple, TypeVar
+from typing import (
+    Any, Callable, ClassVar, Dict, Generic, List, Optional, Sequence, Tuple,
+    TypeVar,
+)
 
 import requests
 from openpyxl import Workbook
@@ -43,17 +52,19 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from book_manager.database.connection import variable_entorno
 from book_manager.entities.entities import (
-    CotizacionDolar, Editorial, EntidadBase, Genero, Libro, Moneda, Precio,
-    PrecioWeb, Stock, TipoCotizacion,
+    Auditoria, CotizacionDolar, Editorial, EntidadBase, Genero, Libro, Moneda,
+    Precio, PrecioWeb, Serializable, Stock, TipoCotizacion,
 )
 from book_manager.repositories.repositories import (
-    IRepositorio, RepositorioCotizacionDolar, RepositorioEditorial,
+    IRepositorio, RepositorioAuditoria, RepositorioCotizacionDolar,
+    RepositorioEditorial,
     RepositorioGenero, RepositorioLibro, RepositorioMoneda,
     RepositorioPrecio, RepositorioPrecioWeb, RepositorioStock,
     RepositorioTipoCotizacion, Repositorios,
 )
 
 T = TypeVar("T", bound=EntidadBase)
+F = TypeVar("F", bound=Callable[..., Any])
 
 CODIGO_PESO = "ARS"
 CODIGO_DOLAR = "USD"
@@ -83,6 +94,111 @@ NOMBRES_CASAS_API: Dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# Sprint 3 - Ejercicio 06: auditoría mediante un decorador
+# ---------------------------------------------------------------------------
+
+#: Profundidad de llamadas auditadas en curso. Solo se registra la
+#: operación más externa: si ``obtener_cotizaciones`` llama a ``crear``,
+#: queda un único registro (el de la operación pedida por el usuario).
+_PROFUNDIDAD_AUDITORIA: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "profundidad_auditoria", default=0)
+LARGO_MAXIMO_DETALLE = 1500
+
+
+class RegistroAuditoria:
+    """Punto único donde el decorador ``auditar`` guarda los registros.
+
+    Se configura una vez con el repositorio de auditoría (lo hace
+    ``Servicios.desde_repositorios`` o ``main``). Si no está configurado
+    las operaciones se ejecutan igual, sin registrar nada; si el registro
+    falla, la operación del usuario no se ve afectada.
+    """
+
+    _repositorio: ClassVar[Optional[RepositorioAuditoria]] = None
+
+    @classmethod
+    def configurar(cls, repositorio: Optional[RepositorioAuditoria]) -> None:
+        cls._repositorio = repositorio
+
+    @classmethod
+    def registrar(cls, accion: str, detalles: str) -> None:
+        if cls._repositorio is None:
+            return
+        try:
+            cls._repositorio.crear(Auditoria(
+                accion, datetime.datetime.now(),
+                detalles[:LARGO_MAXIMO_DETALLE]))
+        except Exception as error:  # la auditoría nunca corta la operación
+            print(f"[auditoría] no se pudo registrar '{accion}': {error}")
+
+
+def describir(valor: Any) -> str:
+    """Texto breve que describe un argumento o un resultado."""
+    if isinstance(valor, Serializable):
+        datos = {k: (v if len(v) <= 60 else v[:57] + "...")
+                 for k, v in valor.a_dict().items() if v != ""}
+        return f"{type(valor).__name__}({datos})"
+    if isinstance(valor, (list, tuple)):
+        return f"{len(valor)} registro(s)"
+    if isinstance(valor, Path):
+        return str(valor)
+    if dataclasses.is_dataclass(valor) and not isinstance(valor, type):
+        texto = str(valor)
+        return texto if not texto.startswith(type(valor).__name__ + "(") \
+            else type(valor).__name__
+    if isinstance(valor, datetime.datetime):
+        return valor.strftime("%Y-%m-%d %H:%M:%S")
+    return repr(valor)
+
+
+def auditar(accion: str, entidad: Optional[str] = None) -> Callable[[F], F]:
+    """Decorador que registra la operación en la tabla de auditoría.
+
+    Registra la acción (por ejemplo ``"ALTA Libro"``), la fecha y los
+    detalles: argumentos recibidos y resultado, o el error si la operación
+    falló (en ese caso la excepción se vuelve a lanzar).
+
+    Args:
+        accion (str): Verbo de la operación (ALTA, BAJA, SCRAPING...).
+        entidad (Optional[str]): Sobre qué se opera. Si no se indica se
+            toma el atributo ``entidad_auditoria`` del servicio.
+    """
+
+    def decorador(funcion: F) -> F:
+        @functools.wraps(funcion)
+        def envoltura(*args: Any, **kwargs: Any) -> Any:
+            objetivo = entidad
+            argumentos = list(args)
+            if objetivo is None and argumentos:
+                objetivo = getattr(argumentos[0], "entidad_auditoria", None)
+                argumentos = argumentos[1:]  # se omite ``self``
+            nombre = f"{accion} {objetivo}".strip() if objetivo else accion
+            partes = [describir(a) for a in argumentos]
+            partes += [f"{k}={describir(v)}" for k, v in kwargs.items()]
+            entrada = f"{funcion.__name__}({', '.join(partes)})"
+            marca = _PROFUNDIDAD_AUDITORIA.set(
+                _PROFUNDIDAD_AUDITORIA.get() + 1)
+            externa = _PROFUNDIDAD_AUDITORIA.get() == 1
+            try:
+                resultado = funcion(*args, **kwargs)
+            except Exception as error:
+                if externa:
+                    RegistroAuditoria.registrar(
+                        f"{nombre} (ERROR)", f"{entrada} -> {error}")
+                raise
+            finally:
+                _PROFUNDIDAD_AUDITORIA.reset(marca)
+            if externa:
+                RegistroAuditoria.registrar(
+                    nombre, f"{entrada} -> {describir(resultado)}")
+            return resultado
+
+        return envoltura  # type: ignore[return-value]
+
+    return decorador
+
+
+# ---------------------------------------------------------------------------
 # Servicio genérico
 # ---------------------------------------------------------------------------
 
@@ -90,10 +206,13 @@ class ServicioBase(Generic[T]):
     """CRUD con validaciones. Las subclases redefinen los métodos hook."""
 
     nombre_entidad = "registro"
+    #: Nombre con el que las operaciones quedan en la auditoría.
+    entidad_auditoria = "Registro"
 
     def __init__(self, repositorio: IRepositorio[T]) -> None:
         self._repositorio = repositorio
 
+    @auditar("LISTADO")
     def listar(self) -> List[T]:
         return self._repositorio.leer_todos()
 
@@ -105,10 +224,12 @@ class ServicioBase(Generic[T]):
                 f"No existe {self.nombre_entidad} con id {id}.")
         return entidad
 
+    @auditar("ALTA")
     def crear(self, entidad: T) -> T:
         self._validar(entidad)
         return self._repositorio.crear(entidad)
 
+    @auditar("MODIFICACION")
     def actualizar(self, entidad: T) -> T:
         if entidad.id is None:
             raise ValueError("La entidad a actualizar debe tener id.")
@@ -116,6 +237,7 @@ class ServicioBase(Generic[T]):
         self._validar(entidad)
         return self._repositorio.actualizar(entidad)
 
+    @auditar("BAJA")
     def eliminar(self, id: int) -> bool:
         self._validar_eliminacion(id)
         return self._repositorio.eliminar(id)
@@ -143,6 +265,7 @@ class ServicioGenero(ServicioBase[Genero]):
     """Reglas de negocio para géneros."""
 
     nombre_entidad = "un género"
+    entidad_auditoria = "Genero"
 
     def __init__(self, repositorio: RepositorioGenero,
                  repo_libros: RepositorioLibro) -> None:
@@ -163,6 +286,7 @@ class ServicioEditorial(ServicioBase[Editorial]):
     """Reglas de negocio para editoriales."""
 
     nombre_entidad = "una editorial"
+    entidad_auditoria = "Editorial"
 
     def __init__(self, repositorio: RepositorioEditorial,
                  repo_libros: RepositorioLibro) -> None:
@@ -184,6 +308,7 @@ class ServicioMoneda(ServicioBase[Moneda]):
     """Reglas de negocio para monedas."""
 
     nombre_entidad = "una moneda"
+    entidad_auditoria = "Moneda"
 
     def __init__(self, repositorio: RepositorioMoneda,
                  repo_precios: RepositorioPrecio,
@@ -223,6 +348,7 @@ class ServicioTipoCotizacion(ServicioBase[TipoCotizacion]):
     """Reglas de negocio para tipos de cotización."""
 
     nombre_entidad = "un tipo de cotización"
+    entidad_auditoria = "TipoCotizacion"
 
     def __init__(self, repositorio: RepositorioTipoCotizacion,
                  repo_cotizaciones: RepositorioCotizacionDolar,
@@ -269,6 +395,7 @@ class ServicioLibro(ServicioBase[Libro]):
     """Reglas de negocio para libros."""
 
     nombre_entidad = "un libro"
+    entidad_auditoria = "Libro"
 
     def __init__(self, repositorio: RepositorioLibro,
                  repo_generos: RepositorioGenero,
@@ -282,9 +409,11 @@ class ServicioLibro(ServicioBase[Libro]):
         self._repo_precios = repo_precios
         self._repo_stock = repo_stock
 
+    @auditar("BUSQUEDA")
     def buscar_por_titulo(self, texto: str) -> List[Libro]:
         return self._repo_libros.buscar_por_titulo(texto)
 
+    @auditar("CONSULTA")
     def obtener_detalle(self, id: int) -> LibroDetalle:
         """Arma el libro con su género, editorial, precios y stock."""
         libro = self.obtener(id)
@@ -309,6 +438,7 @@ class ServicioLibro(ServicioBase[Libro]):
                 f"Ya existe un libro con ISBN {entidad.isbn}: "
                 f"'{existente.titulo}'.")
 
+    @auditar("BAJA")
     def eliminar(self, id: int) -> bool:
         """Elimina el libro y, en cascada, sus precios y su stock.
 
@@ -329,6 +459,7 @@ class ServicioPrecio(ServicioBase[Precio]):
     """Reglas de negocio para precios."""
 
     nombre_entidad = "un precio"
+    entidad_auditoria = "Precio"
 
     def __init__(self, repositorio: RepositorioPrecio,
                  repo_libros: RepositorioLibro,
@@ -358,11 +489,14 @@ class ServicioPrecio(ServicioBase[Precio]):
 class ServicioStock:
     """Reglas de negocio para el stock (clave: id de libro)."""
 
+    entidad_auditoria = "Stock"
+
     def __init__(self, repositorio: RepositorioStock,
                  repo_libros: RepositorioLibro) -> None:
         self._repositorio = repositorio
         self._repo_libros = repo_libros
 
+    @auditar("LISTADO")
     def listar(self) -> List[Stock]:
         return self._repositorio.leer_todos()
 
@@ -372,29 +506,35 @@ class ServicioStock:
             raise ValueError(f"No hay stock cargado para el libro {libro_id}.")
         return stock
 
+    @auditar("ALTA")
     def crear(self, stock: Stock) -> Stock:
         self._validar(stock)
         return self._repositorio.crear(stock)
 
+    @auditar("MODIFICACION")
     def actualizar(self, stock: Stock) -> Stock:
         self._validar(stock)
         return self._repositorio.actualizar(stock)
 
+    @auditar("BAJA")
     def eliminar(self, libro_id: int) -> bool:
         return self._repositorio.eliminar(libro_id)
 
+    @auditar("INGRESO")
     def ingresar(self, libro_id: int, unidades: int) -> Stock:
         """Registra un ingreso de mercadería."""
         stock = self.obtener(libro_id)
         stock.ingresar(unidades)
         return self._repositorio.actualizar(stock)
 
+    @auditar("EGRESO")
     def egresar(self, libro_id: int, unidades: int) -> Stock:
         """Registra un egreso (por ejemplo, una venta)."""
         stock = self.obtener(libro_id)
         stock.egresar(unidades)
         return self._repositorio.actualizar(stock)
 
+    @auditar("REPORTE BAJO MINIMO")
     def listar_bajo_minimo(self) -> List[Tuple[Libro, Stock]]:
         """Libros cuyo stock está por debajo del mínimo definido."""
         resultado: List[Tuple[Libro, Stock]] = []
@@ -477,6 +617,8 @@ class ClienteCotizacionesAPI:
 class ServicioCotizacionDolar:
     """Reglas de negocio para cotizaciones (clave: tipo y fecha)."""
 
+    entidad_auditoria = "Cotizacion"
+
     def __init__(self, repositorio: RepositorioCotizacionDolar,
                  repo_tipos: RepositorioTipoCotizacion,
                  repo_monedas: RepositorioMoneda,
@@ -489,9 +631,11 @@ class ServicioCotizacionDolar:
 
     # -- CRUD -------------------------------------------------------------
 
+    @auditar("LISTADO")
     def listar(self) -> List[CotizacionDolar]:
         return self._repositorio.leer_todos()
 
+    @auditar("HISTORICO")
     def listar_por_tipo(self, tipo_id: int) -> List[CotizacionDolar]:
         return self._repositorio.leer_historico_por_tipo(tipo_id)
 
@@ -514,14 +658,17 @@ class ServicioCotizacionDolar:
                 f"No hay cotizaciones cargadas para el tipo {tipo_id}.")
         return cotizacion
 
+    @auditar("ALTA")
     def crear(self, cotizacion: CotizacionDolar) -> CotizacionDolar:
         self._validar(cotizacion)
         return self._repositorio.crear(cotizacion)
 
+    @auditar("MODIFICACION")
     def actualizar(self, cotizacion: CotizacionDolar) -> CotizacionDolar:
         self._validar(cotizacion)
         return self._repositorio.actualizar(cotizacion)
 
+    @auditar("BAJA")
     def eliminar(self, tipo_id: int, fecha: datetime.date) -> bool:
         return self._repositorio.eliminar(tipo_id, fecha)
 
@@ -544,6 +691,7 @@ class ServicioCotizacionDolar:
             self._cliente_api = ClienteCotizacionesAPI()
         return self._cliente_api
 
+    @auditar("API COTIZACIONES")
     def obtener_cotizaciones(self) -> List[CotizacionImportada]:
         """Busca, descarga y registra en la base las cotizaciones de la API.
 
@@ -679,6 +827,8 @@ class ColumnaMoneda:
 class ServicioCotizador:
     """Convierte los precios de los libros entre pesos y otras monedas."""
 
+    entidad_auditoria = "Precios"
+
     def __init__(self, libros: ServicioLibro, precios: ServicioPrecio,
                  monedas: ServicioMoneda, stock: ServicioStock,
                  tipos: ServicioTipoCotizacion,
@@ -692,6 +842,7 @@ class ServicioCotizador:
 
     # -- reportes del Sprint 1 --------------------------------------------
 
+    @auditar("REPORTE COTIZACION LIBRO")
     def cotizar_libro(self, libro_id: int, tipo_id: int) -> LibroCotizado:
         """Valúa un libro en ARS y USD usando la última cotización del tipo.
 
@@ -702,6 +853,7 @@ class ServicioCotizador:
         cotizacion = self._cotizacion_dolar(tipo_id)
         return self._cotizar(libro, cotizacion)
 
+    @auditar("REPORTE CATALOGO VALUADO")
     def catalogo_valuado(self, tipo_id: int) -> List[LibroCotizado]:
         """Cotiza todos los libros que tengan precio en ARS o USD."""
         cotizacion = self._cotizacion_dolar(tipo_id)
@@ -713,6 +865,7 @@ class ServicioCotizador:
                 continue  # libro sin precio cotizable: se omite del listado
         return resultado
 
+    @auditar("REPORTE VALOR INVENTARIO")
     def valor_inventario(self, tipo_id: int) -> Tuple[float, float]:
         """Suma precio x cantidad en stock para todo el catálogo."""
         total_ars = 0.0
@@ -728,6 +881,7 @@ class ServicioCotizador:
 
     # -- reportes del Sprint 2 (Ejercicio 08) -----------------------------
 
+    @auditar("CONSULTA MONEDAS COTIZADAS")
     def monedas_con_cotizacion(self) -> List[ColumnaMoneda]:
         """Monedas (distintas del peso) que tienen al menos una cotización.
 
@@ -747,6 +901,7 @@ class ServicioCotizador:
                 columnas.append(ColumnaMoneda(moneda, tipo, cotizacion))
         return columnas
 
+    @auditar("REPORTE LISTA BIMONETARIA")
     def lista_precios_bimonetaria(self, tipo_dolar_id: int,
                                   tipo_moneda_id: int
                                   ) -> List[PrecioBimonetario]:
@@ -773,6 +928,7 @@ class ServicioCotizador:
                 valor_moneda=round(cotizado.valor_ars / cotizacion.venta, 2)))
         return resultado
 
+    @auditar("EXPORTACION CSV")
     def exportar_precios_csv(self, ruta: Path,
                              tipo_dolar_id: int) -> Tuple[Path, int, int]:
         """Exporta los precios en pesos y en todas las monedas con cotización.
@@ -891,6 +1047,7 @@ class ServicioScraping(ServicioBase[PrecioWeb]):
     """CRUD de los precios web y ejecución del ``CuspideSpider``."""
 
     nombre_entidad = "un precio web"
+    entidad_auditoria = "PrecioWeb"
 
     def __init__(self, repositorio: RepositorioPrecioWeb,
                  repo_libros: RepositorioLibro,
@@ -929,6 +1086,7 @@ class ServicioScraping(ServicioBase[PrecioWeb]):
 
     # -- ejecución del spider -----------------------------------------------
 
+    @auditar("SCRAPING")
     def ejecutar_scraping(self, libros_ids: Optional[Sequence[int]] = None
                           ) -> ResultadoScraping:
         """Ejecuta el ``CuspideSpider`` y devuelve el resumen.
@@ -1033,6 +1191,8 @@ class ResultadoAlertas:
 class ServicioComparadorPrecios:
     """Compara nuestros precios con los de la competencia."""
 
+    entidad_auditoria = "Precios web"
+
     ENCABEZADOS_ALERTAS = (
         "fecha_extraccion", "libro_id", "isbn", "libro", "precio_interno",
         "precio_web", "diferencia", "diferencia_porcentual",
@@ -1071,6 +1231,7 @@ class ServicioComparadorPrecios:
         tipo = tipo_dolar_id or self.tipo_dolar_por_defecto()
         return self._cotizador.cotizar_libro(libro_id, tipo).valor_ars
 
+    @auditar("COMPARACION")
     def comparar(self, tipo_dolar_id: Optional[int] = None,
                  fecha: Optional[datetime.datetime] = None
                  ) -> List[ComparacionPrecio]:
@@ -1094,6 +1255,7 @@ class ServicioComparadorPrecios:
                                                    precio_web))
         return sorted(comparaciones, key=lambda c: c.libro.id or 0)
 
+    @auditar("ALERTAS CSV")
     def generar_alertas_csv(self, umbral_porcentual: float,
                             tipo_dolar_id: Optional[int] = None,
                             fecha: Optional[datetime.datetime] = None
@@ -1140,6 +1302,7 @@ class ServicioComparadorPrecios:
 
     # -- Ejercicio 05: reporte Excel ------------------------------------------
 
+    @auditar("REPORTE EXCEL")
     def generar_reporte_excel(self, tipo_dolar_id: Optional[int] = None,
                               fecha: Optional[datetime.datetime] = None,
                               carpeta: Path = CARPETA_REPORTES
@@ -1247,6 +1410,35 @@ class ServicioComparadorPrecios:
 
 
 # ---------------------------------------------------------------------------
+# Sprint 3 - Ejercicio 06: consulta del historial de auditoría
+# ---------------------------------------------------------------------------
+
+class ServicioAuditoria(ServicioBase[Auditoria]):
+    """CRUD y consulta del historial de auditoría."""
+
+    nombre_entidad = "un registro de auditoría"
+    entidad_auditoria = "Auditoria"
+
+    def __init__(self, repositorio: RepositorioAuditoria) -> None:
+        super().__init__(repositorio)
+        self._repo_auditoria = repositorio
+
+    @auditar("CONSULTA HISTORIAL")
+    def historial(self, cantidad: int = 30,
+                  accion: Optional[str] = None) -> List[Auditoria]:
+        """Últimas operaciones registradas (las más recientes primero).
+
+        Args:
+            cantidad (int): Cantidad máxima de registros a devolver.
+            accion (Optional[str]): Filtra por texto en la acción
+                (por ejemplo "ALTA", "Libro", "SCRAPING").
+        """
+        if cantidad <= 0:
+            raise ValueError("La cantidad debe ser mayor que cero.")
+        return self._repo_auditoria.leer_ultimas(cantidad, accion)
+
+
+# ---------------------------------------------------------------------------
 # Contenedor con todos los servicios del sistema
 # ---------------------------------------------------------------------------
 
@@ -1265,10 +1457,16 @@ class Servicios:
     cotizador: ServicioCotizador
     scraping: ServicioScraping
     comparador: ServicioComparadorPrecios
+    auditoria: ServicioAuditoria
 
     @classmethod
     def desde_repositorios(cls, repos: Repositorios) -> "Servicios":
-        """Construye todos los servicios inyectando los repositorios."""
+        """Construye todos los servicios inyectando los repositorios.
+
+        También deja configurado el registro de auditoría, de modo que
+        todas las operaciones de los servicios queden auditadas.
+        """
+        RegistroAuditoria.configurar(repos.auditoria)
         libros = ServicioLibro(repos.libros, repos.generos,
                                repos.editoriales, repos.precios, repos.stock)
         precios = ServicioPrecio(repos.precios, repos.libros, repos.monedas)
@@ -1295,4 +1493,5 @@ class Servicios:
             scraping=scraping,
             comparador=ServicioComparadorPrecios(libros, monedas, tipos,
                                                  cotizador, scraping),
+            auditoria=ServicioAuditoria(repos.auditoria),
         )

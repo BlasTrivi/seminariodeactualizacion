@@ -10,7 +10,8 @@ transacciones de ``ConexionDB`` (Ejercicio 03).
 Las entidades del dominio siguen siendo las clases de ``entities.py``;
 cada repositorio sabe convertir entidad <-> modelo ORM.
 
-Sprint 3: ``RepositorioPrecioWeb`` persiste los resultados del scraper.
+Sprint 3: ``RepositorioPrecioWeb`` persiste los resultados del scraper y
+``RepositorioAuditoria`` el historial de operaciones.
 """
 from __future__ import annotations
 
@@ -24,12 +25,12 @@ from sqlalchemy.orm import Session
 
 from book_manager.database.connection import ConexionDB
 from book_manager.entities.entities import (
-    CotizacionDolar, Editorial, EntidadBase, Genero, Libro, Moneda, Precio,
-    PrecioWeb, Stock, TipoCotizacion,
+    Auditoria, CotizacionDolar, Editorial, EntidadBase, Genero, Libro, Moneda,
+    Precio, PrecioWeb, Stock, TipoCotizacion,
 )
 from book_manager.models.models import (
-    Base, CotizacionModel, EditorialModel, GeneroModel, LibroModel,
-    MonedaModel, PrecioModel, PrecioWebModel, StockModel,
+    AuditoriaModel, Base, CotizacionModel, EditorialModel, GeneroModel,
+    LibroModel, MonedaModel, PrecioModel, PrecioWebModel, StockModel,
     TipoCotizacionModel,
 )
 
@@ -587,6 +588,37 @@ class RepositorioPrecioWeb(RepositorioSQL[PrecioWeb, PrecioWebModel]):
             return int(resultado.rowcount or 0)
 
 
+class RepositorioAuditoria(RepositorioSQL[Auditoria, AuditoriaModel]):
+    """Persistencia del historial de auditoría (Sprint 3)."""
+
+    modelo = AuditoriaModel
+
+    def _volcar(self, entidad: Auditoria, modelo: AuditoriaModel) -> None:
+        modelo.accion = entidad.accion
+        modelo.fecha = entidad.fecha
+        modelo.detalles = entidad.detalles
+
+    def _a_entidad(self, modelo: AuditoriaModel) -> Auditoria:
+        return Auditoria(modelo.accion, modelo.fecha, modelo.detalles,
+                         id=modelo.id)
+
+    def leer_ultimas(self, cantidad: int,
+                     accion: Optional[str] = None) -> List[Auditoria]:
+        """Últimos registros (los más recientes primero).
+
+        Args:
+            cantidad (int): Cantidad máxima de registros.
+            accion (Optional[str]): Texto a buscar dentro de la acción.
+        """
+        consulta = select(AuditoriaModel)
+        if accion:
+            consulta = consulta.where(func.lower(AuditoriaModel.accion)
+                                      .like(f"%{accion.strip().lower()}%"))
+        consulta = consulta.order_by(AuditoriaModel.id.desc()).limit(cantidad)
+        with self._conexion.transaccion() as sesion:
+            return [self._a_entidad(r) for r in sesion.scalars(consulta)]
+
+
 # ---------------------------------------------------------------------------
 # Repositorios con clave natural (sin id autoincremental)
 # ---------------------------------------------------------------------------
@@ -749,6 +781,7 @@ class Repositorios:
     stock: RepositorioStock
     cotizaciones: RepositorioCotizacionDolar
     precios_web: RepositorioPrecioWeb
+    auditoria: RepositorioAuditoria
 
     @classmethod
     def desde_conexion(cls, conexion: ConexionDB) -> "Repositorios":
@@ -763,10 +796,15 @@ class Repositorios:
             stock=RepositorioStock(conexion),
             cotizaciones=RepositorioCotizacionDolar(conexion),
             precios_web=RepositorioPrecioWeb(conexion),
+            auditoria=RepositorioAuditoria(conexion),
         )
 
     def todos(self) -> List[Any]:
-        """Lista de repositorios, en el orden de carga de datos."""
+        """Lista de repositorios, en el orden de carga de datos.
+
+        La auditoría queda afuera a propósito: recargar los datos no debe
+        borrar el historial de operaciones.
+        """
         return [self.generos, self.editoriales, self.monedas,
                 self.tipos_cotizacion, self.libros, self.precios,
                 self.stock, self.cotizaciones, self.precios_web]

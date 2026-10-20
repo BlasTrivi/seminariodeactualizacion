@@ -33,6 +33,7 @@ from book_manager.models.models import (
     MonedaModel, PrecioModel, StockModel, TipoCotizacionModel,
 )
 from book_manager.repositories.repositories import Repositorios
+from book_manager.services.services import auditar
 
 ARCHIVO_ESQUEMA = "00_esquema.sql"
 PATRON_SCRIPTS_DATOS = "[0-9][0-9]_*.sql"
@@ -190,6 +191,7 @@ class MigradorCSV:
         return resultados
 
 
+@auditar("MIGRACION CSV", entidad="Base de datos")
 def migrar_datos(carpeta_csvs: str, carpeta_sqls: str,
                  conexion: Optional[ConexionDB] = None
                  ) -> List[ResultadoMigracion]:
@@ -315,6 +317,7 @@ class CargadorSQL:
         return resultados
 
 
+@auditar("CARGA SQL", entidad="Base de datos")
 def cargar_datos_desde_sql(carpeta_sqls: str,
                            conexion: Optional[ConexionDB] = None
                            ) -> List[ResultadoCargaSQL]:

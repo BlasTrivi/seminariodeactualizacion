@@ -32,7 +32,7 @@ from book_manager.preload_data.preload_data import (
     archivos_csv_existen, cargar_datos_iniciales,
 )
 from book_manager.repositories.repositories import Repositorios
-from book_manager.services.services import Servicios
+from book_manager.services.services import RegistroAuditoria, Servicios
 from book_manager.ui.console import ConsolaUI
 
 CARPETA_MIGRACIONES = Path(__file__).resolve().parent / "migrations"
@@ -54,6 +54,7 @@ def preparar_base(conexion: ConexionDB,
     """
     conexion.crear_tablas()
     repositorios = Repositorios.desde_conexion(conexion)
+    RegistroAuditoria.configurar(repositorios.auditoria)
     if import_default_data or not archivos_csv_existen(RUTA_CSV):
         cargar_datos_iniciales(RUTA_CSV)
         print(f"Archivos CSV de origen generados en {RUTA_CSV}")

@@ -5,6 +5,22 @@ día de trabajo (commit `"Día X: ..."`).
 
 # Sprint 3
 
+## [Ejercicio 06]
+
+- Decorador `auditar(accion)` en `services/services.py`: registra en la
+  tabla `auditoria` la acción (por ejemplo `ALTA Libro`), la fecha y los
+  detalles (argumentos y resultado). Si la operación falla se registra
+  como `(ERROR)` con el mensaje y la excepción se propaga. Solo se
+  audita la operación más externa (las llamadas internas no duplican
+  registros) y un fallo de la auditoría nunca corta la operación.
+- Se auditan todas las operaciones: altas, bajas, modificaciones y
+  listados de cada servicio, movimientos de stock, cotizaciones por API,
+  reportes, exportación CSV, scraping, alertas, reporte Excel, migración
+  y carga desde SQL.
+- Nueva entidad `Auditoria` (acción, fecha, detalles), tabla `auditoria`
+  (`AuditoriaModel`), `RepositorioAuditoria` y `ServicioAuditoria`
+  (CRUD + `historial`). La recarga de datos no borra la auditoría.
+
 ## [Ejercicio 05]
 
 - `ServicioComparadorPrecios.generar_reporte_excel` crea
