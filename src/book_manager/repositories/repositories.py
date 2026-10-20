@@ -9,6 +9,8 @@ transacciones de ``ConexionDB`` (Ejercicio 03).
 
 Las entidades del dominio siguen siendo las clases de ``entities.py``;
 cada repositorio sabe convertir entidad <-> modelo ORM.
+
+Sprint 3: ``RepositorioPrecioWeb`` persiste los resultados del scraper.
 """
 from __future__ import annotations
 
@@ -17,17 +19,18 @@ import datetime
 from dataclasses import dataclass
 from typing import Any, Generic, List, Optional, Type, TypeVar
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from book_manager.database.connection import ConexionDB
 from book_manager.entities.entities import (
     CotizacionDolar, Editorial, EntidadBase, Genero, Libro, Moneda, Precio,
-    Stock, TipoCotizacion,
+    PrecioWeb, Stock, TipoCotizacion,
 )
 from book_manager.models.models import (
     Base, CotizacionModel, EditorialModel, GeneroModel, LibroModel,
-    MonedaModel, PrecioModel, StockModel, TipoCotizacionModel,
+    MonedaModel, PrecioModel, PrecioWebModel, StockModel,
+    TipoCotizacionModel,
 )
 
 T = TypeVar("T", bound=EntidadBase)
@@ -513,6 +516,77 @@ class RepositorioPrecio(RepositorioSQL[Precio, PrecioModel]):
             return int(resultado.rowcount or 0)
 
 
+class RepositorioPrecioWeb(RepositorioSQL[PrecioWeb, PrecioWebModel]):
+    """Persistencia de los precios obtenidos por el scraper (Sprint 3)."""
+
+    modelo = PrecioWebModel
+
+    def _volcar(self, entidad: PrecioWeb, modelo: PrecioWebModel) -> None:
+        datos = entidad.a_dict()
+        modelo.libro_id = entidad.libro_id
+        modelo.fecha_extraccion = entidad.fecha_extraccion
+        modelo.posicion = entidad.posicion
+        modelo.titulo = entidad.titulo[:250]
+        modelo.url = entidad.url[:500]
+        modelo.precio = entidad.precio
+        modelo.precio_usd = entidad.precio_usd
+        modelo.url_imagen = entidad.url_imagen[:500]
+        modelo.formas_pago = datos["formas_pago"]
+        modelo.descripcion = entidad.descripcion
+        modelo.isbn = entidad.isbn[:20]
+        modelo.coincidencia = entidad.coincidencia
+        modelo.seleccionado = entidad.seleccionado
+
+    def _a_entidad(self, modelo: PrecioWebModel) -> PrecioWeb:
+        return PrecioWeb(modelo.libro_id, modelo.fecha_extraccion,
+                         modelo.posicion, modelo.titulo, modelo.url,
+                         modelo.precio, modelo.precio_usd, modelo.url_imagen,
+                         modelo.formas_pago, modelo.descripcion, modelo.isbn,
+                         modelo.coincidencia, modelo.seleccionado,
+                         id=modelo.id)
+
+    def leer_por_libro(self, libro_id: int) -> List[PrecioWeb]:
+        """Todos los resultados de un libro (todas las ejecuciones)."""
+        with self._conexion.transaccion() as sesion:
+            return self._buscar(sesion, PrecioWebModel.libro_id == libro_id)
+
+    def ultima_fecha_extraccion(self) -> Optional[datetime.datetime]:
+        """Fecha y hora de la última ejecución del scraper (o None)."""
+        with self._conexion.transaccion() as sesion:
+            return sesion.execute(
+                select(func.max(PrecioWebModel.fecha_extraccion))).scalar()
+
+    def leer_por_fecha(self, fecha: datetime.datetime) -> List[PrecioWeb]:
+        """Resultados de una ejecución, ordenados por libro y posición."""
+        with self._conexion.transaccion() as sesion:
+            consulta = (select(PrecioWebModel)
+                        .where(PrecioWebModel.fecha_extraccion == fecha)
+                        .order_by(PrecioWebModel.libro_id,
+                                  PrecioWebModel.posicion))
+            return [self._a_entidad(r) for r in sesion.scalars(consulta)]
+
+    def leer_seleccionados(self, fecha: datetime.datetime) -> List[PrecioWeb]:
+        """Resultado elegido para cada libro en una ejecución."""
+        with self._conexion.transaccion() as sesion:
+            return self._buscar(sesion,
+                                PrecioWebModel.fecha_extraccion == fecha,
+                                PrecioWebModel.seleccionado.is_(True))
+
+    def marcar_seleccionado(self, id: int) -> None:
+        """Marca un resultado como el elegido para comparar precios."""
+        with self._conexion.transaccion() as sesion:
+            sesion.execute(update(PrecioWebModel)
+                           .where(PrecioWebModel.id == id)
+                           .values(seleccionado=True))
+
+    def eliminar_por_libro(self, libro_id: int) -> int:
+        """Elimina los resultados de un libro y devuelve cuántos borró."""
+        with self._conexion.transaccion() as sesion:
+            resultado = sesion.execute(delete(PrecioWebModel).where(
+                PrecioWebModel.libro_id == libro_id))
+            return int(resultado.rowcount or 0)
+
+
 # ---------------------------------------------------------------------------
 # Repositorios con clave natural (sin id autoincremental)
 # ---------------------------------------------------------------------------
@@ -674,6 +748,7 @@ class Repositorios:
     precios: RepositorioPrecio
     stock: RepositorioStock
     cotizaciones: RepositorioCotizacionDolar
+    precios_web: RepositorioPrecioWeb
 
     @classmethod
     def desde_conexion(cls, conexion: ConexionDB) -> "Repositorios":
@@ -687,13 +762,14 @@ class Repositorios:
             precios=RepositorioPrecio(conexion),
             stock=RepositorioStock(conexion),
             cotizaciones=RepositorioCotizacionDolar(conexion),
+            precios_web=RepositorioPrecioWeb(conexion),
         )
 
     def todos(self) -> List[Any]:
         """Lista de repositorios, en el orden de carga de datos."""
         return [self.generos, self.editoriales, self.monedas,
                 self.tipos_cotizacion, self.libros, self.precios,
-                self.stock, self.cotizaciones]
+                self.stock, self.cotizaciones, self.precios_web]
 
     def esta_vacia(self) -> bool:
         """Indica si ninguna tabla del sistema tiene registros."""

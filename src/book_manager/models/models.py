@@ -18,6 +18,9 @@ Esquema (normalizado):
     stock(libro_id -> libros [PK], cantidad, cantidad_minima)
     cotizaciones(tipo_id -> tipos_cotizacion [PK], fecha [PK],
                  compra, venta)
+    precios_web(id, libro_id -> libros, fecha_extraccion, posicion,
+                titulo, url, precio, precio_usd, url_imagen, formas_pago,
+                descripcion, isbn, coincidencia, seleccionado)   [Sprint 3]
 """
 from __future__ import annotations
 
@@ -25,7 +28,8 @@ import datetime
 from typing import List, Optional
 
 from sqlalchemy import (
-    Date, ForeignKey, Integer, Numeric, String, UniqueConstraint,
+    Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -133,6 +137,8 @@ class LibroModel(Base):
         back_populates="libro", cascade="all, delete-orphan")
     stock: Mapped[Optional["StockModel"]] = relationship(
         back_populates="libro", cascade="all, delete-orphan", uselist=False)
+    precios_web: Mapped[List["PrecioWebModel"]] = relationship(
+        back_populates="libro", cascade="all, delete-orphan")
 
 
 class PrecioModel(Base):
@@ -183,6 +189,47 @@ class CotizacionModel(Base):
 
     tipo: Mapped["TipoCotizacionModel"] = relationship(
         back_populates="cotizaciones")
+
+
+#: Nombre usado en el enunciado del Sprint 3 para la tabla de cotizaciones.
+CotizacionDolarModel = CotizacionModel
+
+
+class PrecioWebModel(Base):
+    """Tabla ``precios_web``: resultados del scraper en Cúspide (Sprint 3).
+
+    Cada ejecución del scraper guarda, por libro del catálogo, hasta 10
+    resultados de la búsqueda; ``seleccionado`` marca el que se usa para
+    comparar contra el precio interno.
+    """
+
+    __tablename__ = "precios_web"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    libro_id: Mapped[int] = mapped_column(
+        ForeignKey("libros.id", ondelete="CASCADE"), nullable=False,
+        index=True)
+    fecha_extraccion: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, index=True)
+    posicion: Mapped[int] = mapped_column(Integer, nullable=False)
+    titulo: Mapped[str] = mapped_column(String(250), nullable=False)
+    url: Mapped[str] = mapped_column(String(500), nullable=False)
+    precio: Mapped[float] = mapped_column(IMPORTE, nullable=False)
+    precio_usd: Mapped[Optional[float]] = mapped_column(IMPORTE,
+                                                        nullable=True)
+    url_imagen: Mapped[str] = mapped_column(String(500), nullable=False,
+                                            default="")
+    formas_pago: Mapped[str] = mapped_column(Text, nullable=False,
+                                             default="")
+    descripcion: Mapped[str] = mapped_column(Text, nullable=False,
+                                             default="")
+    isbn: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    coincidencia: Mapped[int] = mapped_column(Integer, nullable=False,
+                                              default=0)
+    seleccionado: Mapped[bool] = mapped_column(Boolean, nullable=False,
+                                               default=False)
+
+    libro: Mapped["LibroModel"] = relationship(back_populates="precios_web")
 
 
 #: Modelos en el orden que respeta las claves foráneas (para insertar).

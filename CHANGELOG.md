@@ -5,6 +5,29 @@ día de trabajo (commit `"Día X: ..."`).
 
 # Sprint 3
 
+## [Ejercicio 03]
+
+- Proyecto Scrapy en `scraper/` (`scrapy.cfg`, `settings.py`, `items.py`,
+  `loaders.py`, `pipelines.py`, `spiders/cuspide.py`, `runner.py`).
+- `CuspideSpider` busca por título **solo los libros de nuestro catálogo**
+  (leídos de la base) y procesa los 10 primeros resultados de cada
+  búsqueda: precio (ARS y U$s), URL de la imagen, formas de pago con su
+  precio, descripción detallada, ISBN, título y autor. Si una búsqueda no
+  devuelve resultados se reintenta con el título simplificado.
+- Item Loader `LibroCuspideLoader` con procesadores de entrada/salida
+  (limpieza de textos, precios con formato argentino, URLs absolutas,
+  nombres de medios de pago).
+- Pipelines: `ValidacionPipeline`, `FormasPagoPipeline`,
+  `CoincidenciaPipeline` (puntaje por ISBN, título y autor) y
+  `BaseDatosPipeline` (guarda en `precios_web` y marca el mejor resultado
+  de cada libro).
+- Nueva entidad `PrecioWeb`, tabla `precios_web` (`PrecioWebModel`) y
+  `RepositorioPrecioWeb`; alias `CotizacionDolarModel`.
+- `ServicioScraping.ejecutar_scraping` corre el spider en un proceso
+  aparte (el reactor de Twisted no se puede reiniciar) y devuelve el
+  resumen de la ejecución; los resultados también quedan en
+  `reportes/scraping/*.json`.
+
 ## [Ejercicio 02]
 
 - `migrations/migrations.py`: nueva función `cargar_datos_desde_sql(carpeta_sqls)`

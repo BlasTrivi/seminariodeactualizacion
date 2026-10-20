@@ -10,18 +10,26 @@ del Sprint 2 para poblar la base de datos.
 Sprint 2: ``TipoCotizacion`` incorpora ``moneda_id`` (normalización),
 de modo que un tipo de cotización pertenece a una moneda (el dólar tiene
 Oficial, Blue, MEP...; el euro o el real tienen su cotización Oficial).
+
+Sprint 3: ``PrecioWeb`` guarda cada resultado obtenido por el scraper en
+el sitio de la competencia (Cúspide).
 """
 from __future__ import annotations
 
 import abc
 import datetime
-from typing import ClassVar, Dict, Optional, Tuple, Type, TypeVar, Union
+from typing import (
+    ClassVar, Dict, List, Optional, Sequence, Tuple, Type, TypeVar, Union,
+)
 
 S = TypeVar("S", bound="Serializable")
 
 ANIO_MINIMO = 1450
 LONGITUDES_ISBN = (10, 13)
 FORMATO_FECHA = "%Y-%m-%d"
+FORMATO_FECHA_HORA = "%Y-%m-%d %H:%M:%S"
+#: Separador de las formas de pago cuando se guardan como texto.
+SEPARADOR_FORMAS_PAGO = " | "
 #: Id de la moneda USD en los datos iniciales (valor por defecto para los
 #: tipos de cotización que vienen de los CSV del Sprint 1).
 MONEDA_USD_ID = 2
@@ -98,6 +106,27 @@ def fecha_desde(valor: object) -> datetime.date:
     except ValueError as error:
         raise ValueError(
             "La fecha debe tener el formato AAAA-MM-DD.") from error
+
+
+def fecha_hora_desde(valor: object) -> datetime.datetime:
+    """Acepta un datetime, un date o un texto 'AAAA-MM-DD HH:MM:SS'."""
+    if isinstance(valor, datetime.datetime):
+        return valor.replace(microsecond=0)
+    if isinstance(valor, datetime.date):
+        return datetime.datetime.combine(valor, datetime.time())
+    texto = str(valor).strip().replace("T", " ")
+    try:
+        return datetime.datetime.fromisoformat(texto).replace(microsecond=0)
+    except ValueError as error:
+        raise ValueError("La fecha y hora debe tener el formato "
+                         "AAAA-MM-DD HH:MM:SS.") from error
+
+
+def numero_opcional(valor: object, campo: str) -> Optional[float]:
+    """Número positivo o None si el valor viene vacío."""
+    if valor is None or str(valor).strip() == "":
+        return None
+    return numero_positivo(valor, campo)
 
 
 # ---------------------------------------------------------------------------
@@ -647,3 +676,216 @@ class CotizacionDolar(Serializable):
         return cls(tipo_id=int(datos["tipo_id"]), fecha=datos["fecha"],
                    compra=float(datos["compra"]),
                    venta=float(datos["venta"]))
+
+
+# ---------------------------------------------------------------------------
+# Sprint 3: precios de la competencia obtenidos por el scraper
+# ---------------------------------------------------------------------------
+
+class PrecioWeb(EntidadBase):
+    """Resultado de buscar uno de nuestros libros en el sitio de Cúspide.
+
+    Por cada libro del catálogo el scraper guarda hasta 10 resultados de
+    la búsqueda por título (``posicion`` 1 a 10). ``coincidencia`` (0 a
+    100) mide cuánto se parece el resultado a nuestro libro (ISBN, título
+    y autor) y ``seleccionado`` marca el resultado que se usa para
+    comparar precios.
+    """
+
+    CAMPOS = ("id", "libro_id", "fecha_extraccion", "posicion", "titulo",
+              "url", "precio", "precio_usd", "url_imagen", "formas_pago",
+              "descripcion", "isbn", "coincidencia", "seleccionado")
+
+    POSICION_MAXIMA = 10
+
+    def __init__(self, libro_id: int,
+                 fecha_extraccion: Union[datetime.datetime, str],
+                 posicion: int, titulo: str, url: str, precio: float,
+                 precio_usd: Optional[float] = None, url_imagen: str = "",
+                 formas_pago: Union[Sequence[str], str, None] = None,
+                 descripcion: str = "", isbn: str = "",
+                 coincidencia: int = 0, seleccionado: bool = False,
+                 id: Optional[int] = None) -> None:
+        super().__init__(id)
+        self._libro_id = 0
+        self._fecha_extraccion = datetime.datetime.now()
+        self._posicion = 1
+        self._titulo = ""
+        self._url = ""
+        self._precio = 0.0
+        self._precio_usd: Optional[float] = None
+        self._url_imagen = ""
+        self._formas_pago: List[str] = []
+        self._descripcion = ""
+        self._isbn = ""
+        self._coincidencia = 0
+        self._seleccionado = False
+        self.libro_id = libro_id
+        self.fecha_extraccion = fecha_extraccion
+        self.posicion = posicion
+        self.titulo = titulo
+        self.url = url
+        self.precio = precio
+        self.precio_usd = precio_usd
+        self.url_imagen = url_imagen
+        self.formas_pago = formas_pago or []
+        self.descripcion = descripcion
+        self.isbn = isbn
+        self.coincidencia = coincidencia
+        self.seleccionado = seleccionado
+
+    @property
+    def libro_id(self) -> int:
+        return self._libro_id
+
+    @libro_id.setter
+    def libro_id(self, valor: int) -> None:
+        self._libro_id = entero_positivo(valor, "libro_id")
+
+    @property
+    def fecha_extraccion(self) -> datetime.datetime:
+        """Momento en que se ejecutó el scraper."""
+        return self._fecha_extraccion
+
+    @fecha_extraccion.setter
+    def fecha_extraccion(self, valor: Union[datetime.datetime, str]) -> None:
+        self._fecha_extraccion = fecha_hora_desde(valor)
+
+    @property
+    def posicion(self) -> int:
+        """Lugar del resultado en la búsqueda (1 a 10)."""
+        return self._posicion
+
+    @posicion.setter
+    def posicion(self, valor: int) -> None:
+        posicion = entero_positivo(valor, "posicion")
+        if posicion > self.POSICION_MAXIMA:
+            raise ValueError("Solo se guardan los 10 primeros resultados.")
+        self._posicion = posicion
+
+    @property
+    def titulo(self) -> str:
+        return self._titulo
+
+    @titulo.setter
+    def titulo(self, valor: str) -> None:
+        self._titulo = texto_obligatorio(valor, "titulo")
+
+    @property
+    def url(self) -> str:
+        return self._url
+
+    @url.setter
+    def url(self, valor: str) -> None:
+        url = texto_obligatorio(valor, "url")
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("La URL debe comenzar con http:// o https://.")
+        self._url = url
+
+    @property
+    def precio(self) -> float:
+        """Precio publicado en pesos."""
+        return self._precio
+
+    @precio.setter
+    def precio(self, valor: float) -> None:
+        self._precio = numero_positivo(valor, "precio")
+
+    @property
+    def precio_usd(self) -> Optional[float]:
+        """Precio en dólares publicado por el sitio (si lo informa)."""
+        return self._precio_usd
+
+    @precio_usd.setter
+    def precio_usd(self, valor: Optional[float]) -> None:
+        self._precio_usd = numero_opcional(valor, "precio_usd")
+
+    @property
+    def url_imagen(self) -> str:
+        return self._url_imagen
+
+    @url_imagen.setter
+    def url_imagen(self, valor: str) -> None:
+        self._url_imagen = texto_opcional(valor)
+
+    @property
+    def formas_pago(self) -> List[str]:
+        """Formas de pago, cada una con el precio que corresponde."""
+        return list(self._formas_pago)
+
+    @formas_pago.setter
+    def formas_pago(self, valor: Union[Sequence[str], str]) -> None:
+        if isinstance(valor, str):
+            valor = valor.split(SEPARADOR_FORMAS_PAGO)
+        self._formas_pago = [texto_opcional(forma) for forma in valor
+                             if texto_opcional(forma)]
+
+    @property
+    def descripcion(self) -> str:
+        return self._descripcion
+
+    @descripcion.setter
+    def descripcion(self, valor: str) -> None:
+        self._descripcion = texto_opcional(valor)
+
+    @property
+    def isbn(self) -> str:
+        return self._isbn
+
+    @isbn.setter
+    def isbn(self, valor: str) -> None:
+        self._isbn = texto_opcional(valor).replace("-", "").replace(" ", "")
+
+    @property
+    def coincidencia(self) -> int:
+        """Puntaje 0-100 de parecido con el libro del catálogo."""
+        return self._coincidencia
+
+    @coincidencia.setter
+    def coincidencia(self, valor: int) -> None:
+        puntaje = entero_no_negativo(valor, "coincidencia")
+        self._coincidencia = min(puntaje, 100)
+
+    @property
+    def seleccionado(self) -> bool:
+        return self._seleccionado
+
+    @seleccionado.setter
+    def seleccionado(self, valor: Union[bool, str]) -> None:
+        if isinstance(valor, str):
+            valor = valor.strip().lower() in ("1", "true", "si", "sí")
+        self._seleccionado = bool(valor)
+
+    def a_dict(self) -> Dict[str, str]:
+        return {
+            "id": self._id_como_texto(), "libro_id": str(self.libro_id),
+            "fecha_extraccion": self.fecha_extraccion.strftime(
+                FORMATO_FECHA_HORA),
+            "posicion": str(self.posicion), "titulo": self.titulo,
+            "url": self.url, "precio": f"{self.precio:.2f}",
+            "precio_usd": "" if self.precio_usd is None
+            else f"{self.precio_usd:.2f}",
+            "url_imagen": self.url_imagen,
+            "formas_pago": SEPARADOR_FORMAS_PAGO.join(self.formas_pago),
+            "descripcion": self.descripcion, "isbn": self.isbn,
+            "coincidencia": str(self.coincidencia),
+            "seleccionado": "1" if self.seleccionado else "0",
+        }
+
+    @classmethod
+    def desde_dict(cls, datos: Dict[str, str]) -> "PrecioWeb":
+        return cls(libro_id=int(datos["libro_id"]),
+                   fecha_extraccion=datos["fecha_extraccion"],
+                   posicion=int(datos["posicion"]), titulo=datos["titulo"],
+                   url=datos["url"], precio=float(datos["precio"]),
+                   precio_usd=datos.get("precio_usd") or None,
+                   url_imagen=datos.get("url_imagen", ""),
+                   formas_pago=datos.get("formas_pago", ""),
+                   descripcion=datos.get("descripcion", ""),
+                   isbn=datos.get("isbn", ""),
+                   coincidencia=int(datos.get("coincidencia") or 0),
+                   seleccionado=datos.get("seleccionado", "0"),
+                   id=id_opcional(datos.get("id")))
+
+    def __str__(self) -> str:
+        return f"{self.titulo} ($ {self.precio:,.2f})"

@@ -14,12 +14,21 @@ Sprint 2:
 - ``ServicioCotizador`` suma la lista de precios bimonetaria (pesos y
   otra moneda seleccionada) y la exportación a CSV de los precios en
   todas las monedas con cotización (Ejercicio 08).
+
+Sprint 3:
+
+- ``ServicioScraping`` ejecuta el scraper de Cúspide (Ejercicio 03).
 """
 from __future__ import annotations
 
 import csv
 import datetime
-from dataclasses import dataclass
+import json
+import os
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Generic, List, Optional, Sequence, Tuple, TypeVar
 
@@ -28,13 +37,13 @@ import requests
 from book_manager.database.connection import variable_entorno
 from book_manager.entities.entities import (
     CotizacionDolar, Editorial, EntidadBase, Genero, Libro, Moneda, Precio,
-    Stock, TipoCotizacion,
+    PrecioWeb, Stock, TipoCotizacion,
 )
 from book_manager.repositories.repositories import (
     IRepositorio, RepositorioCotizacionDolar, RepositorioEditorial,
     RepositorioGenero, RepositorioLibro, RepositorioMoneda,
-    RepositorioPrecio, RepositorioStock, RepositorioTipoCotizacion,
-    Repositorios,
+    RepositorioPrecio, RepositorioPrecioWeb, RepositorioStock,
+    RepositorioTipoCotizacion, Repositorios,
 )
 
 T = TypeVar("T", bound=EntidadBase)
@@ -46,6 +55,13 @@ CODIGO_DOLAR = "USD"
 VARIABLE_API_URL = "API_URL"
 VARIABLE_API_URL_COTIZACIONES = "API_URL_COTIZACIONES"
 TIEMPO_ESPERA_API = 15  # segundos
+
+#: Carpetas del Sprint 3: código fuente y reportes generados.
+CARPETA_PAQUETE = Path(__file__).resolve().parents[1]
+CARPETA_SRC = CARPETA_PAQUETE.parent
+CARPETA_REPORTES = CARPETA_PAQUETE / "reportes"
+CARPETA_SCRAPER = CARPETA_PAQUETE / "scraper"
+TIEMPO_MAXIMO_SCRAPING = 30 * 60  # segundos
 
 #: Nombre que usa el sistema para cada "casa" de la API del dólar.
 NOMBRES_CASAS_API: Dict[str, str] = {
@@ -840,6 +856,124 @@ class ServicioCotizador:
 
 
 # ---------------------------------------------------------------------------
+# Sprint 3 - Ejercicio 03: scraping de precios de la competencia
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ResultadoScraping:
+    """Resumen de una ejecución del scraper."""
+
+    fecha_extraccion: datetime.datetime
+    libros_buscados: int
+    libros_con_resultados: int
+    libros_sin_resultados: List[int]
+    resultados_guardados: int
+    libros_con_coincidencia: int
+    archivo_resultados: Path
+    segundos: float
+
+    def __str__(self) -> str:
+        return (f"Scraping del {self.fecha_extraccion}: "
+                f"{self.libros_buscados} libro(s) buscados, "
+                f"{self.resultados_guardados} resultado(s) guardados, "
+                f"{self.libros_con_coincidencia} libro(s) encontrados "
+                f"({self.segundos:.0f} s).")
+
+
+class ServicioScraping(ServicioBase[PrecioWeb]):
+    """CRUD de los precios web y ejecución del ``CuspideSpider``."""
+
+    nombre_entidad = "un precio web"
+
+    def __init__(self, repositorio: RepositorioPrecioWeb,
+                 repo_libros: RepositorioLibro,
+                 carpeta_salida: Path = CARPETA_REPORTES / "scraping"
+                 ) -> None:
+        super().__init__(repositorio)
+        self._repo_web = repositorio
+        self._repo_libros = repo_libros
+        self._carpeta_salida = Path(carpeta_salida)
+
+    def _validar(self, entidad: PrecioWeb) -> None:
+        if self._repo_libros.leer_por_id(entidad.libro_id) is None:
+            raise ValueError(f"No existe un libro con id {entidad.libro_id}.")
+
+    # -- consultas ----------------------------------------------------------
+
+    def ultima_fecha_extraccion(self) -> datetime.datetime:
+        """Fecha de la última ejecución; falla si nunca se ejecutó."""
+        fecha = self._repo_web.ultima_fecha_extraccion()
+        if fecha is None:
+            raise ValueError("Todavía no se ejecutó el scraping: use la "
+                             "opción 'Ejecutar scraping'.")
+        return fecha
+
+    def resultados(self, fecha: Optional[datetime.datetime] = None
+                   ) -> List[PrecioWeb]:
+        """Todos los resultados de una ejecución (por defecto la última)."""
+        return self._repo_web.leer_por_fecha(
+            fecha or self.ultima_fecha_extraccion())
+
+    def seleccionados(self, fecha: Optional[datetime.datetime] = None
+                      ) -> List[PrecioWeb]:
+        """Resultado elegido para cada libro en una ejecución."""
+        return self._repo_web.leer_seleccionados(
+            fecha or self.ultima_fecha_extraccion())
+
+    # -- ejecución del spider -----------------------------------------------
+
+    def ejecutar_scraping(self, libros_ids: Optional[Sequence[int]] = None
+                          ) -> ResultadoScraping:
+        """Ejecuta el ``CuspideSpider`` y devuelve el resumen.
+
+        El spider corre en un proceso separado (ver ``scraper/runner.py``)
+        para poder ejecutarlo varias veces en la misma sesión. Los
+        resultados quedan en la tabla ``precios_web`` y en un JSON dentro
+        de ``reportes/scraping``.
+
+        Args:
+            libros_ids (Optional[Sequence[int]]): Libros a buscar; por
+                defecto, todo el catálogo.
+
+        Raises:
+            ValueError: Si el catálogo está vacío o el scraper falla.
+        """
+        if not self._repo_libros.leer_todos():
+            raise ValueError("No hay libros en el catálogo para buscar.")
+        fecha = datetime.datetime.now().replace(microsecond=0)
+        sello = fecha.strftime("%Y%m%d_%H%M%S")
+        self._carpeta_salida.mkdir(parents=True, exist_ok=True)
+        archivo_resumen = self._carpeta_salida / f"resumen_{sello}.json"
+        archivo_resultados = self._carpeta_salida / f"cuspide_{sello}.json"
+        comando = [sys.executable, "-m", "book_manager.scraper.runner",
+                   "--resumen", str(archivo_resumen),
+                   "--resultados", str(archivo_resultados),
+                   "--fecha", fecha.isoformat(sep=" ")]
+        if libros_ids:
+            comando += ["--libros", ",".join(str(i) for i in libros_ids)]
+        entorno = dict(os.environ)
+        entorno["PYTHONPATH"] = os.pathsep.join(
+            filter(None, [str(CARPETA_SRC), entorno.get("PYTHONPATH")]))
+        inicio = time.monotonic()
+        proceso = subprocess.run(
+            comando, cwd=CARPETA_SCRAPER, env=entorno, capture_output=True,
+            text=True, timeout=TIEMPO_MAXIMO_SCRAPING, check=False)
+        if proceso.returncode != 0 or not archivo_resumen.exists():
+            detalle = (proceso.stderr or proceso.stdout).strip()[-1500:]
+            raise ValueError(f"El scraper terminó con error:\n{detalle}")
+        datos = json.loads(archivo_resumen.read_text(encoding="utf-8"))
+        return ResultadoScraping(
+            fecha_extraccion=fecha,
+            libros_buscados=int(datos["libros_buscados"]),
+            libros_con_resultados=int(datos["libros_con_resultados"]),
+            libros_sin_resultados=list(datos["libros_sin_resultados"]),
+            resultados_guardados=int(datos["resultados_guardados"]),
+            libros_con_coincidencia=int(datos["libros_con_coincidencia"]),
+            archivo_resultados=archivo_resultados,
+            segundos=round(time.monotonic() - inicio, 1))
+
+
+# ---------------------------------------------------------------------------
 # Contenedor con todos los servicios del sistema
 # ---------------------------------------------------------------------------
 
@@ -856,6 +990,7 @@ class Servicios:
     stock: ServicioStock
     cotizaciones: ServicioCotizacionDolar
     cotizador: ServicioCotizador
+    scraping: ServicioScraping
 
     @classmethod
     def desde_repositorios(cls, repos: Repositorios) -> "Servicios":
@@ -881,4 +1016,5 @@ class Servicios:
             cotizaciones=cotizaciones,
             cotizador=ServicioCotizador(libros, precios, monedas, stock,
                                         tipos, cotizaciones),
+            scraping=ServicioScraping(repos.precios_web, repos.libros),
         )
