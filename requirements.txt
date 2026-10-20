@@ -1,6 +1,8 @@
-# Book Manager - Sprint 2
-# Además de la biblioteca estándar (abc, csv, dataclasses, datetime, pathlib,
-# typing) el proyecto utiliza:
-SQLAlchemy>=2.0        # ORM y conexión a la base de datos (Ejercicios 02-06)
-python-dotenv>=1.0     # Lectura del archivo .env (Ejercicio 07)
-requests>=2.31         # Consulta a la API del dólar (Ejercicio 07)
+# Book Manager - Sprint 3
+# Además de la biblioteca estándar (abc, csv, dataclasses, datetime, json,
+# pathlib, subprocess, typing) el proyecto utiliza:
+SQLAlchemy>=2.0        # ORM y conexión a la base de datos (Sprint 2)
+python-dotenv>=1.0     # Lectura del archivo .env
+requests>=2.31         # Consulta a la API del dólar (Sprint 2)
+scrapy>=2.11           # Scraper de precios de Cúspide (Sprint 3, Ej. 03)
+openpyxl>=3.1          # Reporte Excel de precios (Sprint 3, Ej. 05)

@@ -3,6 +3,17 @@
 Los cambios más recientes aparecen primero. Cada ejercicio corresponde a un
 día de trabajo (commit `"Día X: ..."`).
 
+# Sprint 3
+
+## [Ejercicio 01]
+
+- Se crea la rama `Sprint_3` a partir del último push de `Sprint_2`.
+- Nueva estructura: paquete `scraper/` (proyecto Scrapy) y carpeta
+  `reportes/` para las alertas CSV y los reportes Excel.
+- `.env` incorpora `CUSPIDE_URL`; `requirements.txt` suma `scrapy` y
+  `openpyxl`.
+- `README.md` actualizado con el objetivo y el contexto del Sprint 3.
+
 # Sprint 2
 
 ## [Ejercicio 08]

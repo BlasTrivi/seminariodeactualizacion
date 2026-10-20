@@ -1,6 +1,6 @@
 # Book Manager
 
-**Sprint actual: Sprint 2**
+**Sprint actual: Sprint 3**
 
 Trabajo Práctico Integrador - Grupo 15
 
@@ -13,30 +13,37 @@ Repositorio: https://github.com/BlasTrivi/seminariodeactualizacion
 Aplicar los conocimientos adquiridos en programación orientada a objetos y
 almacenamiento de datos para su persistencia, construyendo una aplicación
 de consola (CLI) en Python que gestione el inventario de una librería con
-venta al público. En este sprint la persistencia pasa de archivos a una
-base de datos relacional y se incorporan consultas a una API externa.
+venta al público. En este sprint se incorpora la obtención de datos desde
+la web (*web scraping*) para comparar nuestros precios con los de la
+competencia.
 
-## Introducción y contexto del Sprint 2
+## Introducción y contexto del Sprint 3
 
-En la primera entrega el sistema guardaba cada entidad en archivos CSV. En
-esta segunda entrega se amplía el alcance haciendo que la aplicación
-persista en una **base de datos relacional** mediante el ORM
-[SQLAlchemy](https://www.sqlalchemy.org/):
+En la primera entrega el sistema guardaba cada entidad en archivos CSV y en
+la segunda pasó a persistir en una base de datos relacional (SQLAlchemy),
+con consultas a la API del dólar. En esta tercera entrega vamos a
+**descargar y obtener datos de la web para trabajar con ellos**: la idea es
+conocer los precios de nuestros competidores (librerías con venta online)
+para compararnos con ellos y competir de forma más informada.
 
-- Se migran todos los datos cargados en los CSV del TP1 a tablas
-  relacionales normalizadas, dejando constancia en archivos `.sql`.
-- La conexión se configura de forma segura desde un archivo `.env`
-  (`DATABASE_URL`), sin credenciales en el código. Por defecto se usa una
-  base SQLite local; cambiando la URL se puede apuntar a PostgreSQL /
-  Supabase sin tocar el resto del sistema.
-- Las transacciones se manejan con un *context manager* que confirma los
-  cambios al salir del bloque y los revierte ante cualquier error.
-- Se consulta la API pública del dólar (https://dolarapi.com) para
-  descargar y registrar las cotizaciones del día, y se suman reportes
-  bimonetarios (pesos y otra moneda) con exportación a CSV.
+- La base de datos puede cargarse directamente desde los scripts `.sql`
+  generados en la migración del Sprint 2.
+- Un scraper hecho con **Scrapy** (`CuspideSpider`) busca en
+  [Cúspide](https://cuspide.com) cada libro **de nuestro catálogo** (por
+  título, solo los 10 primeros resultados) y obtiene el precio, la URL de
+  la imagen, las formas de pago con su precio y la descripción detallada.
+  Se usan *Item Loaders* para limpiar los datos y *Pipelines* para
+  validarlos, calcular la coincidencia con nuestro libro y guardarlos.
+- Antes de cada ejecución el usuario indica la diferencia de precios (%)
+  a partir de la cual se genera una alerta; cada corrida deja un archivo
+  CSV de alertas que se puede descargar.
+- Se genera un reporte Excel con libro, precio interno, precio web,
+  diferencia y fecha de extracción.
+- Todas las operaciones del sistema quedan registradas en una tabla de
+  **auditoría** mediante un decorador.
 
-Se parte del último push de la rama `Sprint_1` y se trabaja sobre la rama
-`Sprint_2`.
+Se parte del último push de la rama `Sprint_2` y se trabaja sobre la rama
+`Sprint_3`.
 
 ## Estructura del proyecto
 
@@ -44,54 +51,35 @@ Se parte del último push de la rama `Sprint_1` y se trabaja sobre la rama
 book_manager/
 ├── src/
 │   └── book_manager/
-│       ├── database/connection.py        # ConexionDB + Transaccion (Ej. 02 y 03)
-│       ├── entities/entities.py          # Entidades del dominio (Sprint 1)
-│       ├── models/models.py              # Tablas ORM con relaciones (Ej. 04)
+│       ├── database/connection.py        # ConexionDB + Transaccion
+│       ├── entities/entities.py          # Entidades del dominio
+│       ├── models/models.py              # Tablas ORM con relaciones
 │       ├── preload_data/preload_data.py  # Datos iniciales -> CSV de origen
-│       ├── repositories/repositories.py  # CRUD sobre base de datos (Ej. 06)
-│       ├── services/services.py          # Lógica de negocio + API (Ej. 07)
+│       ├── repositories/repositories.py  # CRUD sobre base de datos
+│       ├── scraper/                      # Proyecto Scrapy (Ej. 03)
+│       │   ├── scrapy.cfg
+│       │   ├── items.py · loaders.py · pipelines.py · settings.py
+│       │   ├── runner.py                 # Ejecuta el spider en un proceso
+│       │   └── spiders/cuspide.py        # CuspideSpider
+│       ├── services/services.py          # Lógica de negocio, alertas,
+│       │                                 # reportes y auditoría
 │       ├── migrations/
-│       │   ├── migrations.py             # Migración CSV -> DB + .sql (Ej. 05)
+│       │   ├── migrations.py             # CSV -> DB, .sql y carga desde .sql
 │       │   ├── csv/                      # Archivos de origen (TP1)
 │       │   └── sql/                      # Scripts generados en la migración
-│       ├── ui/console.py                 # Interfaz de consola (Ej. 08)
+│       ├── reportes/                     # Alertas CSV y reportes Excel
+│       ├── ui/console.py                 # Interfaz de consola
 │       └── main.py                       # Punto de entrada
-├── .env                                  # API_URL y DATABASE_URL
+├── .env                                  # API_URL, DATABASE_URL, CUSPIDE_URL
 ├── CHANGELOG.md
 ├── README.md
 └── requirements.txt
 ```
 
-## Modelo de datos
-
-```
-generos ──┐                    monedas ──┬── precios ── libros ── stock
-editoriales ┴── libros                   └── tipos_cotizacion ── cotizaciones
-```
-
-- `tipos_cotizacion` incorpora `moneda_id`: un tipo de cambio pertenece a
-  una moneda (el dólar tiene Oficial, Blue, MEP, CCL...; el euro o el real
-  tienen su tipo Oficial). Los CSV del TP1 no tenían esa columna: la
-  migración asigna USD.
-- `cotizaciones` conserva el histórico por tipo y fecha (clave compuesta).
-
 ## Cómo ejecutar
-
-Instalar las dependencias y configurar el `.env`:
 
 ```bash
 pip install -r requirements.txt
-```
-
-```
-API_URL=https://dolarapi.com/v1/dolares
-API_URL_COTIZACIONES=https://dolarapi.com/v1/cotizaciones
-DATABASE_URL=sqlite:///book_manager.db
-```
-
-Desde la terminal, parado en `src/`:
-
-```bash
 cd src
 python -m book_manager.main
 ```
@@ -102,27 +90,3 @@ Desde un notebook (Google Colab):
 from book_manager.main import main
 main(import_default_data=False)   # True regenera los CSV y vuelve a migrar
 ```
-
-En la primera ejecución (base vacía) el sistema crea las tablas, migra los
-CSV de `migrations/csv` y genera los scripts en `migrations/sql`.
-
-La migración también puede ejecutarse por separado:
-
-```python
-from book_manager.migrations.migrations import migrar_datos
-migrar_datos("src/book_manager/migrations/csv", "src/book_manager/migrations/sql")
-```
-
-## Menú del sistema
-
-1-8. ABM (Listar / Alta / Modificar / Baja) de Libros, Géneros, Editoriales,
-     Monedas, Tipos de cotización, Precios, Stock y Cotizaciones.
-9. Reportes: catálogo valuado, cotizar un libro, stock bajo mínimo, valor
-   del inventario, histórico de cotizaciones, lista bimonetaria y
-   exportación.
-10. **Obtener las cotizaciones por API**: descarga y registra en la base las
-    cotizaciones del día (dólar por tipo y otras monedas).
-11. **Lista de precios bimonetaria**: precios en pesos y en otra moneda
-    seleccionada (USD según tipo, EUR, BRL, CLP, UYU...).
-12. **Exportar precios a CSV**: una columna por cada moneda/tipo con
-    cotización registrada (`exports/precios_todas_las_monedas.csv`).
