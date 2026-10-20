@@ -1,4 +1,4 @@
-"""Punto de entrada de Book Manager (Sprint 2).
+"""Punto de entrada de Book Manager (Sprint 3).
 
 Uso desde el notebook o desde Python::
 
@@ -13,9 +13,11 @@ Secuencia de arranque:
 
 1. Se abre la conexión (``ConexionDB``) con la URL del ``.env``.
 2. Se crean las tablas si no existen.
-3. Si se pide ``import_default_data`` se regeneran los CSV de origen; si
-   la base está vacía (primera ejecución) se migran los CSV del TP1 a las
-   tablas y se generan los archivos ``.sql``.
+3. Si se pide ``import_default_data`` se regeneran los CSV de origen y se
+   migran a las tablas (generando los archivos ``.sql``). Si la base está
+   vacía (primera ejecución) se carga desde los scripts ``.sql`` de
+   ``migrations/sql`` (Sprint 3, Ejercicio 02); si no hubiera scripts, se
+   migran los CSV del TP1.
 4. Se arman repositorios y servicios y se lanza la consola.
 """
 from __future__ import annotations
@@ -23,7 +25,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from book_manager.database.connection import ConexionDB
-from book_manager.migrations.migrations import migrar_datos
+from book_manager.migrations.migrations import (
+    cargar_datos_desde_sql, migrar_datos, scripts_sql_existen,
+)
 from book_manager.preload_data.preload_data import (
     archivos_csv_existen, cargar_datos_iniciales,
 )
@@ -53,7 +57,13 @@ def preparar_base(conexion: ConexionDB,
     if import_default_data or not archivos_csv_existen(RUTA_CSV):
         cargar_datos_iniciales(RUTA_CSV)
         print(f"Archivos CSV de origen generados en {RUTA_CSV}")
-    if import_default_data or repositorios.esta_vacia():
+    if not import_default_data and repositorios.esta_vacia() \
+            and scripts_sql_existen(RUTA_SQL):
+        cargas = cargar_datos_desde_sql(str(RUTA_SQL), conexion)
+        print(f"Carga desde SQL -> {conexion.dialecto}: "
+              f"{sum(c.sentencias for c in cargas)} sentencias de "
+              f"{len(cargas)} scripts en {RUTA_SQL}")
+    elif import_default_data or repositorios.esta_vacia():
         resultados = migrar_datos(str(RUTA_CSV), str(RUTA_SQL), conexion)
         total = sum(r.registros for r in resultados)
         print(f"Migración CSV -> {conexion.dialecto}: {total} registros en "

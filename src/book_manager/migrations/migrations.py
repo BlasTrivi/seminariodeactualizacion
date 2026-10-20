@@ -7,6 +7,10 @@ genera en ``migrations/sql`` un archivo ``.sql`` por tabla con las
 sentencias ``INSERT`` equivalentes (más ``00_esquema.sql`` con el DDL de
 las tablas). Así queda constancia de la carga inicial y puede repetirse
 en cualquier motor compatible con SQL.
+
+Sprint 3 (Ejercicio 02): ``cargar_datos_desde_sql`` hace el camino
+inverso, es decir, puebla la base ejecutando los scripts ``.sql`` que
+quedaron en ``migrations/sql``.
 """
 from __future__ import annotations
 
@@ -14,7 +18,7 @@ import csv
 import datetime
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Type
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple, Type
 
 from sqlalchemy import Date, Integer, Numeric
 from sqlalchemy.schema import CreateTable
@@ -31,6 +35,7 @@ from book_manager.models.models import (
 from book_manager.repositories.repositories import Repositorios
 
 ARCHIVO_ESQUEMA = "00_esquema.sql"
+PATRON_SCRIPTS_DATOS = "[0-9][0-9]_*.sql"
 
 #: (archivo csv, clase de entidad, modelo ORM, atributo de Repositorios)
 #: en el orden que respeta las claves foráneas.
@@ -212,3 +217,124 @@ def migrar_datos(carpeta_csvs: str, carpeta_sqls: str,
 def resumen(resultados: Sequence[ResultadoMigracion]) -> Dict[str, int]:
     """Diccionario ``tabla -> registros`` a partir de los resultados."""
     return {r.tabla: r.registros for r in resultados}
+
+
+# ---------------------------------------------------------------------------
+# Sprint 3 - Ejercicio 02: carga de los datos desde los archivos .sql
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ResultadoCargaSQL:
+    """Resumen de la ejecución de un script ``.sql``."""
+
+    archivo_sql: Path
+    sentencias: int
+
+    def __str__(self) -> str:
+        return f"{self.archivo_sql.name:<26} {self.sentencias:>4} sentencias"
+
+
+class CargadorSQL:
+    """Ejecuta los scripts ``.sql`` de datos sobre la base de datos.
+
+    Los scripts se ejecutan en orden de nombre (``01_generos.sql``,
+    ``02_editoriales.sql``...), que es el orden que respeta las claves
+    foráneas. El esquema (``00_esquema.sql``) no se ejecuta porque es
+    propio del dialecto con el que se generó: las tablas se crean con
+    SQLAlchemy, lo que funciona en cualquier motor.
+    """
+
+    def __init__(self, conexion: ConexionDB, carpeta_sqls: Path) -> None:
+        self._conexion = conexion
+        self._carpeta_sqls = Path(carpeta_sqls)
+
+    def scripts(self) -> List[Path]:
+        """Scripts de datos disponibles, ordenados por nombre."""
+        return sorted(ruta for ruta in
+                      self._carpeta_sqls.glob(PATRON_SCRIPTS_DATOS)
+                      if ruta.name != ARCHIVO_ESQUEMA)
+
+    @staticmethod
+    def sentencias(script: str) -> Iterator[str]:
+        """Separa un script en sentencias SQL.
+
+        Respeta los literales entre comillas simples (un ``;`` dentro de
+        un texto no corta la sentencia) e ignora los comentarios ``--``.
+        """
+        actual: List[str] = []
+        en_texto = False
+        for linea in script.splitlines(keepends=True):
+            if not en_texto and not "".join(actual).strip() \
+                    and linea.lstrip().startswith("--"):
+                continue
+            for caracter in linea:
+                if caracter == "'":
+                    en_texto = not en_texto
+                if caracter == ";" and not en_texto:
+                    sentencia = "".join(actual).strip()
+                    if sentencia:
+                        yield sentencia
+                    actual = []
+                else:
+                    actual.append(caracter)
+        resto = "".join(actual).strip()
+        if resto:
+            yield resto
+
+    def cargar(self, vaciar: bool = True) -> List[ResultadoCargaSQL]:
+        """Crea las tablas y ejecuta todos los scripts en una transacción.
+
+        Args:
+            vaciar (bool): Si es True se borran los datos existentes antes
+                de ejecutar los scripts, para que la carga sea repetible.
+
+        Returns:
+            List[ResultadoCargaSQL]: Un resumen por script ejecutado.
+
+        Raises:
+            FileNotFoundError: Si no hay scripts de datos en la carpeta.
+        """
+        scripts = self.scripts()
+        if not scripts:
+            raise FileNotFoundError(
+                f"No hay scripts .sql de datos en {self._carpeta_sqls}.")
+        self._conexion.crear_tablas()
+        if vaciar:
+            Repositorios.desde_conexion(self._conexion).vaciar()
+        resultados: List[ResultadoCargaSQL] = []
+        with self._conexion.transaccion() as sesion:
+            conexion_db = sesion.connection()
+            for ruta in scripts:
+                cantidad = 0
+                for sentencia in self.sentencias(
+                        ruta.read_text(encoding="utf-8")):
+                    # exec_driver_sql no interpreta ":texto" como parámetro
+                    conexion_db.exec_driver_sql(sentencia)
+                    cantidad += 1
+                resultados.append(ResultadoCargaSQL(ruta, cantidad))
+        return resultados
+
+
+def cargar_datos_desde_sql(carpeta_sqls: str,
+                           conexion: Optional[ConexionDB] = None
+                           ) -> List[ResultadoCargaSQL]:
+    """Carga los datos en la base ejecutando los archivos ``.sql``.
+
+    Args:
+        carpeta_sqls (str): Carpeta donde están los scripts ``.sql``
+            generados por ``migrar_datos``.
+        conexion (Optional[ConexionDB]): Conexión a usar; si no se indica
+            se crea una con la configuración del ``.env``.
+
+    Returns:
+        List[ResultadoCargaSQL]: Cantidad de sentencias ejecutadas por
+            cada archivo.
+    """
+    conexion = conexion or ConexionDB()
+    return CargadorSQL(conexion, Path(carpeta_sqls)).cargar()
+
+
+def scripts_sql_existen(carpeta_sqls: Path) -> bool:
+    """Indica si hay scripts ``.sql`` de datos para cargar la base."""
+    return any(ruta.name != ARCHIVO_ESQUEMA for ruta in
+               Path(carpeta_sqls).glob(PATRON_SCRIPTS_DATOS))

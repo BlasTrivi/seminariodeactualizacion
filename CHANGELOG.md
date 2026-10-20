@@ -5,6 +5,18 @@ día de trabajo (commit `"Día X: ..."`).
 
 # Sprint 3
 
+## [Ejercicio 02]
+
+- `migrations/migrations.py`: nueva función `cargar_datos_desde_sql(carpeta_sqls)`
+  que crea las tablas, vacía los datos previos y ejecuta en una sola
+  transacción los scripts `01_...sql` a `08_...sql` generados en la
+  migración (el esquema `00_esquema.sql` se omite porque depende del
+  dialecto; las tablas las crea SQLAlchemy).
+- `CargadorSQL.sentencias` separa cada script respetando los textos entre
+  comillas y los comentarios `--`.
+- `main.py`: si la base está vacía se carga desde los `.sql`; si no hay
+  scripts se migran los CSV como en el Sprint 2.
+
 ## [Ejercicio 01]
 
 - Se crea la rama `Sprint_3` a partir del último push de `Sprint_2`.
